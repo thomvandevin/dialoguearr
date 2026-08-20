@@ -12,9 +12,16 @@ For each file holding a 6-channel track but no stereo track, this adds an AAC
 TARGET_LUFS with a constrained loudness range, and marks it default. The
 original surround track is always preserved.
 
+Work arrives two ways. Sonarr and Radarr POST to the webhook on import, and
+those are handled straight away so a file is ready the same evening. The
+periodic scan is a backfill safety net for anything the webhook missed, and is
+confined to WINDOW_START..WINDOW_END so bulk work happens overnight.
+
 Environment variables:
     MEDIA_PATH        Root directory to scan (default: /data/media)
-    SCAN_INTERVAL     Seconds between scans (default: 3600)
+    SCAN_INTERVAL     Seconds between backfill scans (default: 3600)
+    WEBHOOK_PORT      Port for the Sonarr/Radarr webhook (default: 8080)
+    IMPORT_DELAY      Seconds to let an imported file settle (default: 60)
     WINDOW_START      Hour processing may begin, 0-23 (default: 3)
     WINDOW_END        Hour processing must stop, 0-23 (default: 8)
     TARGET_LUFS       Integrated loudness target (default: -16)
@@ -25,6 +32,8 @@ Environment variables:
     PAN_SURROUND      Surround left/right weight (default: 0.25)
     AUDIO_BITRATE     Bitrate of the new track (default: 256k)
     TRACK_TITLE       Title of the new track, also the already-done marker
+    PREFERRED_LANGUAGES  Comma-separated codes, e.g. "jpn,eng". Empty means
+                      follow whichever track the file marks default.
     PLEX_URL          Plex base URL, empty disables refreshes
     PLEX_TOKEN        Plex authentication token
     DRY_RUN           "true" to report candidates without writing (default: false)
@@ -34,12 +43,15 @@ Environment variables:
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import requests
@@ -50,6 +62,8 @@ import requests
 
 MEDIA_PATH = Path(os.environ.get("MEDIA_PATH", "/data/media"))
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "3600"))
+WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8080"))
+IMPORT_DELAY = int(os.environ.get("IMPORT_DELAY", "60"))
 
 WINDOW_START = int(os.environ.get("WINDOW_START", "3"))
 WINDOW_END = int(os.environ.get("WINDOW_END", "8"))
@@ -64,6 +78,13 @@ PAN_SURROUND = float(os.environ.get("PAN_SURROUND", "0.25"))
 
 AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "256k")
 TRACK_TITLE = os.environ.get("TRACK_TITLE", "Stereo (dialogue boost)")
+PREFERRED_LANGUAGES = [x.strip().lower()
+                       for x in os.environ.get("PREFERRED_LANGUAGES", "").split(",")
+                       if x.strip()]
+
+# Files tag languages inconsistently as 2- or 3-letter codes.
+LANG_ALIASES = {"ja": "jpn", "jp": "jpn", "en": "eng", "es": "spa", "fr": "fra",
+                "de": "deu", "ger": "deu", "it": "ita", "pt": "por", "nl": "nld"}
 
 PLEX_URL = os.environ.get("PLEX_URL", "").rstrip("/")
 PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
@@ -115,6 +136,11 @@ def probe(path):
         return None
 
 
+def language_of(stream):
+    code = ((stream.get("tags") or {}).get("language") or "").lower()
+    return LANG_ALIASES.get(code, code)
+
+
 def surround_track(info):
     """Return (audio-relative index, stream) of the 5.1 track to convert."""
     audio = [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
@@ -124,10 +150,22 @@ def surround_track(info):
         return None
     if any(int(s.get("channels") or 0) <= 2 for s in audio):
         return None
-    for i, s in enumerate(audio):
-        if int(s.get("channels") or 0) == 6:
+    surround = [(i, s) for i, s in enumerate(audio)
+                if int(s.get("channels") or 0) == 6]
+    if not surround:
+        return None
+
+    # Most of these files carry several dubs in arbitrary track order, so an
+    # explicit preference wins, then whichever track the release marked
+    # default, so the new track matches the language that played before.
+    for want in PREFERRED_LANGUAGES:
+        for i, s in surround:
+            if language_of(s) == LANG_ALIASES.get(want, want):
+                return i, s
+    for i, s in surround:
+        if (s.get("disposition") or {}).get("default"):
             return i, s
-    return None
+    return surround[0]
 
 
 def analyse(path, aidx):
@@ -212,7 +250,7 @@ def plex_sections():
         return []
     try:
         r = requests.get(f"{PLEX_URL}/library/sections",
-                         params={"X-Plex-Token": PLEX_TOKEN}, timeout=15)
+                         headers={"X-Plex-Token": PLEX_TOKEN}, timeout=15)
         r.raise_for_status()
         root = ET.fromstring(r.text)
     except (requests.RequestException, ET.ParseError) as exc:
@@ -230,8 +268,8 @@ def plex_refresh(path, sections):
             continue
         try:
             requests.put(f"{PLEX_URL}/library/sections/{key}/refresh",
-                         params={"path": folder, "X-Plex-Token": PLEX_TOKEN},
-                         timeout=15)
+                         params={"path": folder},
+                         headers={"X-Plex-Token": PLEX_TOKEN}, timeout=15)
         except requests.RequestException as exc:
             log.warning("  Plex refresh failed: %s", exc)
 
@@ -324,29 +362,129 @@ def process(path, sections):
             tmp.unlink()
 
 
+# ---------------------------------------------------------------------------
+# Work queue
+# ---------------------------------------------------------------------------
+
+work = queue.Queue()
+pending = set()
+pending_lock = threading.Lock()
+
+
+def enqueue(path, urgent):
+    with pending_lock:
+        if path in pending:
+            return False
+        pending.add(path)
+    work.put((path, urgent))
+    return True
+
+
+def worker(sections):
+    while True:
+        path, urgent = work.get()
+        try:
+            # Backfill items are window-bound; the next scan re-queues whatever
+            # is dropped here. Imports are never deferred.
+            if not urgent and not in_window():
+                continue
+            if urgent and IMPORT_DELAY:
+                time.sleep(IMPORT_DELAY)
+            if not path.is_file():
+                continue
+            process(path, sections)
+        except OSError as exc:
+            log.error("error handling %s: %s", path.name, exc)
+        finally:
+            with pending_lock:
+                pending.discard(path)
+            work.task_done()
+
+
+# ---------------------------------------------------------------------------
+# Webhook
+# ---------------------------------------------------------------------------
+
+
+def media_paths(obj, found=None):
+    """Pull existing media file paths out of an arbitrary webhook payload.
+
+    Sonarr and Radarr disagree on payload shape and have changed it between
+    versions, so this walks the whole document rather than reading fixed keys.
+    """
+    if found is None:
+        found = []
+    if isinstance(obj, dict):
+        for value in obj.values():
+            media_paths(value, found)
+    elif isinstance(obj, list):
+        for value in obj:
+            media_paths(value, found)
+    elif isinstance(obj, str) and obj.startswith("/"):
+        candidate = Path(obj)
+        if candidate.suffix.lower() in CONTAINERS and candidate.is_file():
+            found.append(candidate)
+    return found
+
+
+class WebhookHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        event = payload.get("eventType", "?") if isinstance(payload, dict) else "?"
+        if event == "Test":
+            log.info("webhook test received")
+            return
+
+        for path in dict.fromkeys(media_paths(payload)):
+            if enqueue(path, urgent=True):
+                log.info("webhook (%s) queued %s", event, path.name)
+
+    def log_message(self, *args):
+        pass
+
+
+def serve():
+    server = ThreadingHTTPServer(("0.0.0.0", WEBHOOK_PORT), WebhookHandler)
+    server.serve_forever()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
 def main():
     log.info("audio-normalize starting")
     log.info("  media=%s window=%02d:00-%02d:00 target=%.1f LUFS lra=%.1f dry_run=%s",
              MEDIA_PATH, WINDOW_START, WINDOW_END, TARGET_LUFS, TARGET_LRA, DRY_RUN)
 
     cleanup_temp()
+    sections = plex_sections()
 
-    sections = []
+    threading.Thread(target=worker, args=(sections,), daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+    log.info("  webhook listening on port %d", WEBHOOK_PORT)
+
     while True:
         if in_window():
-            if not sections:
-                sections = plex_sections()
-            processed = 0
+            queued = 0
             for path in scan():
-                if not in_window():
-                    log.info("processing window closed, pausing")
-                    break
-                try:
-                    if process(path, sections):
-                        processed += 1
-                except OSError as exc:
-                    log.error("error handling %s: %s", path.name, exc)
-            log.info("scan finished, %d file(s) rewritten", processed)
+                info = probe(path)
+                if info and surround_track(info) and enqueue(path, urgent=False):
+                    queued += 1
+            if queued:
+                log.info("backfill scan queued %d file(s)", queued)
         time.sleep(SCAN_INTERVAL)
 
 
