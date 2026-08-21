@@ -42,6 +42,7 @@ Environment variables:
 
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -94,6 +95,7 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
 CONTAINERS = {".mkv", ".mp4", ".m4v"}
 DURATION_TOLERANCE = 2.0
+SILENCE_FLOOR = -60.0  # ebur128 reports -70 for digital silence
 
 # Channel indices rather than names: ffmpeg labels the surround pair BL/BR for
 # 5.1 but SL/SR for 5.1(side), while the channel order is identical in both.
@@ -102,6 +104,8 @@ PAN = (
     f"c0={PAN_CENTRE}*c2+{PAN_FRONT}*c0+{PAN_SURROUND}*c4|"
     f"c1={PAN_CENTRE}*c2+{PAN_FRONT}*c1+{PAN_SURROUND}*c5"
 )
+
+SINGLE_PASS = object()
 
 LOUDNORM_JSON = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.S)
 EBUR128_I = re.compile(r"I:\s+(-?[\d.]+|-inf)\s+LUFS")
@@ -179,18 +183,32 @@ def analyse(path, aidx):
         log.error("  no loudnorm measurement returned")
         return None
     try:
-        return json.loads(m.group(0))
+        data = json.loads(m.group(0))
     except json.JSONDecodeError:
         return None
 
+    # A stream whose format changes mid-file makes ffmpeg rebuild the filter
+    # graph and report only the final segment, which is often a second of
+    # silence. Those measurements are unusable, so normalise in one pass.
+    try:
+        if all(math.isfinite(float(data[k]))
+               for k in ("input_i", "input_lra", "input_tp", "input_thresh")):
+            return data
+    except (KeyError, ValueError):
+        pass
+    log.warning("  measurement unusable (input_i=%s), using single-pass",
+                data.get("input_i"))
+    return SINGLE_PASS
+
 
 def encode(src, dst, aidx, measured, n_audio):
-    flt = (f"{PAN},loudnorm=I={TARGET_LUFS}:LRA={TARGET_LRA}:TP={TARGET_TP}"
-           f":measured_I={measured['input_i']}"
-           f":measured_LRA={measured['input_lra']}"
-           f":measured_TP={measured['input_tp']}"
-           f":measured_thresh={measured['input_thresh']}"
-           f":offset={measured['target_offset']}")
+    flt = f"{PAN},loudnorm=I={TARGET_LUFS}:LRA={TARGET_LRA}:TP={TARGET_TP}"
+    if measured is not SINGLE_PASS:
+        flt += (f":measured_I={measured['input_i']}"
+                f":measured_LRA={measured['input_lra']}"
+                f":measured_TP={measured['input_tp']}"
+                f":measured_thresh={measured['input_thresh']}"
+                f":offset={measured['target_offset']}")
 
     cmd = ["ffmpeg", "-y", "-hide_banner", "-nostats", "-i", str(src),
            "-map", "0:v", "-map", f"0:a:{aidx}", "-map", "0:a",
@@ -229,15 +247,30 @@ def verify(dst, expected_duration):
     if (audio[0].get("tags") or {}).get("title") != TRACK_TITLE:
         return False, "new track is not labelled"
 
-    # A truncated encode still probes correctly, so decode near the end too.
-    r = run(["ffmpeg", "-hide_banner", "-nostats", "-ss", str(max(0, duration - 45)),
-             "-t", "30", "-i", str(dst), "-map", "0:a:0", "-af", "ebur128",
-             "-f", "null", "-"])
-    found = EBUR128_I.findall(r.stderr)
-    if not found or found[-1] == "-inf":
-        return False, "no audio near end of new track"
+    # Duration already rules out truncation, so sample for content instead.
+    # A film may legitimately end in silence, but a broken encode is silent
+    # throughout, so probe inside the body and take the loudest reading.
+    loudest = None
+    for fraction in (0.5, 0.25, 0.75):
+        r = run(["ffmpeg", "-hide_banner", "-nostats", "-ss", str(duration * fraction),
+                 "-t", "30", "-i", str(dst), "-map", "0:a:0", "-af", "ebur128",
+                 "-f", "null", "-"])
+        found = EBUR128_I.findall(r.stderr)
+        if not found or found[-1] == "-inf":
+            continue
+        try:
+            level = float(found[-1])
+        except ValueError:
+            continue
+        if loudest is None or level > loudest:
+            loudest = level
+        if loudest > SILENCE_FLOOR:
+            break
 
-    return True, f"tail {found[-1]} LUFS"
+    if loudest is None or loudest <= SILENCE_FLOOR:
+        return False, "new track is silent"
+
+    return True, f"{loudest:.1f} LUFS"
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +367,9 @@ def process(path, sections):
     measured = analyse(path, aidx)
     if not measured:
         return False
-    log.info("  measured %s LUFS, LRA %s, peak %s dBTP",
-             measured["input_i"], measured["input_lra"], measured["input_tp"])
+    if measured is not SINGLE_PASS:
+        log.info("  measured %s LUFS, LRA %s, peak %s dBTP",
+                 measured["input_i"], measured["input_lra"], measured["input_tp"])
 
     mtime = path.stat().st_mtime
     tmp = path.with_name(f".{path.stem}.audionorm{path.suffix}")
