@@ -278,7 +278,19 @@ def verify(dst, expected_duration):
 # ---------------------------------------------------------------------------
 
 
+_sections = []
+
+
 def plex_sections():
+    """Library sections, fetched lazily and cached on first success.
+
+    Plex is usually still starting when this container comes up after a host
+    reboot, so fetching once at startup would leave refreshes silently
+    disabled for the lifetime of the process.
+    """
+    global _sections
+    if _sections:
+        return _sections
     if not (PLEX_URL and PLEX_TOKEN):
         return []
     try:
@@ -289,13 +301,14 @@ def plex_sections():
     except (requests.RequestException, ET.ParseError) as exc:
         log.warning("could not list Plex sections: %s", exc)
         return []
-    return [(d.get("key"), [loc.get("path") for loc in d.findall("Location")])
-            for d in root.findall("Directory")]
+    _sections = [(d.get("key"), [loc.get("path") for loc in d.findall("Location")])
+                 for d in root.findall("Directory")]
+    return _sections
 
 
-def plex_refresh(path, sections):
+def plex_refresh(path):
     folder = str(path.parent)
-    for key, paths in sections:
+    for key, paths in plex_sections():
         if not any(folder == p or folder.startswith(p.rstrip("/") + "/")
                    for p in paths if p):
             continue
@@ -341,13 +354,24 @@ def cleanup_temp():
             log.error("could not remove %s: %s", stale.name, exc)
 
 
-def process(path, sections):
+def process(path):
     info = probe(path)
     if not info:
         return False
 
     picked = surround_track(info)
     if not picked:
+        # Only webhook-queued files reach here without being candidates, since
+        # the backfill scan pre-filters. Saying why keeps a silent skip from
+        # looking like a failure.
+        audio = [x for x in info.get("streams", []) if x.get("codec_type") == "audio"]
+        if any((x.get("tags") or {}).get("title") == TRACK_TITLE for x in audio):
+            reason = "already has a dialogue-boost track"
+        elif any(int(x.get("channels") or 0) <= 2 for x in audio):
+            reason = "already has a stereo track"
+        else:
+            reason = "no 5.1 track"
+        log.info("skipping %s: %s", path.name, reason)
         return False
     aidx, stream = picked
 
@@ -389,7 +413,7 @@ def process(path, sections):
         os.replace(tmp, path)
         os.chmod(path, 0o664)
         log.info("  replaced (%s)", detail)
-        plex_refresh(path, sections)
+        plex_refresh(path)
         return True
     finally:
         if tmp.exists():
@@ -414,7 +438,7 @@ def enqueue(path, urgent):
     return True
 
 
-def worker(sections):
+def worker():
     while True:
         path, urgent = work.get()
         try:
@@ -426,7 +450,7 @@ def worker(sections):
                 time.sleep(IMPORT_DELAY)
             if not path.is_file():
                 continue
-            process(path, sections)
+            process(path)
         except OSError as exc:
             log.error("error handling %s: %s", path.name, exc)
         finally:
@@ -504,9 +528,7 @@ def main():
              MEDIA_PATH, WINDOW_START, WINDOW_END, TARGET_LUFS, TARGET_LRA, DRY_RUN)
 
     cleanup_temp()
-    sections = plex_sections()
-
-    threading.Thread(target=worker, args=(sections,), daemon=True).start()
+    threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=serve, daemon=True).start()
     log.info("  webhook listening on port %d", WEBHOOK_PORT)
 
