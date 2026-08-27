@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dialoguearr</title>
+<style>
+  /* Palette mirrors the Glance dashboard so this does not read as a separate app. */
+  :root {
+    --bg: hsl(225 14% 15%); --panel: hsl(225 14% 19%); --line: hsl(225 14% 26%);
+    --fg: hsl(225 14% 92%); --dim: hsl(225 10% 62%);
+    --primary: hsl(25 89% 62%); --neg: hsl(359 68% 61%); --pos: hsl(145 45% 55%);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
+  h1 span { color: var(--primary); }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+           border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 22px; }
+  header .meta { color: var(--dim); font-size: 13px; }
+  .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+  .card .n { font-size: 26px; font-weight: 600; line-height: 1.1; }
+  .card .k { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin-top: 4px; }
+  .card.neg .n { color: var(--neg); } .card.pos .n { color: var(--pos); }
+  .status { margin: 22px 0; background: var(--panel); border: 1px solid var(--line);
+            border-radius: 8px; padding: 14px 16px; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); display: inline-block; margin-right: 7px; }
+  .dot.live { background: var(--primary); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  nav { display: flex; gap: 6px; margin: 26px 0 14px; flex-wrap: wrap; }
+  nav button { background: transparent; border: 1px solid var(--line); color: var(--dim);
+               padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  nav button.on { background: var(--primary); border-color: var(--primary); color: hsl(225 14% 12%); font-weight: 600; }
+  input[type=search] { background: var(--panel); border: 1px solid var(--line); color: var(--fg);
+                       padding: 7px 12px; border-radius: 6px; font-size: 13px; min-width: 220px; }
+  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
+  th { text-align: left; background: var(--panel); color: var(--dim); font-weight: 600;
+       padding: 9px 12px; border-bottom: 1px solid var(--line); text-transform: uppercase;
+       font-size: 11px; letter-spacing: .05em; position: sticky; top: 0; }
+  td { padding: 8px 12px; border-bottom: 1px solid hsl(225 14% 22%); }
+  tr:last-child td { border-bottom: 0; }
+  td.name { white-space: normal; min-width: 280px; }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 4px; background: hsl(225 14% 26%); color: var(--fg); }
+  .tag.done { background: hsl(145 35% 26%); color: hsl(145 60% 82%); }
+  .tag.eligible { background: hsl(25 50% 28%); color: hsl(25 85% 80%); }
+  .tag.failed, .tag.aborted { background: hsl(359 40% 30%); color: hsl(359 75% 84%); }
+  .tag.replaced { background: hsl(145 35% 26%); color: hsl(145 60% 82%); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .empty { padding: 26px; text-align: center; color: var(--dim); }
+  footer { margin-top: 30px; color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>dialogue<span>arr</span></h1>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="status">
+    <div><span class="dot" id="dot"></span><strong id="stage">idle</strong></div>
+    <div class="meta" id="current"></div>
+    <div class="meta" id="queue"></div>
+  </div>
+
+  <nav>
+    <button data-view="files" class="on">Files</button>
+    <button data-view="runs">History</button>
+    <input type="search" id="q" placeholder="filter by name">
+  </nav>
+
+  <div class="scroll"><div id="table"></div></div>
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let view = "files";
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const num = (v, d = 1) => v === null || v === undefined ? "" : Number(v).toFixed(d);
+const ago = (iso) => {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return Math.round(s) + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+};
+
+async function get(url) { const r = await fetch(url); return r.json(); }
+
+async function loadSummary() {
+  const s = await get("/api/summary");
+  const langs = Object.entries(s.by_language || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
+  $("cards").innerHTML = `
+    <div class="card pos"><div class="n">${s.done}</div><div class="k">processed</div></div>
+    <div class="card"><div class="n">${s.eligible}</div><div class="k">eligible</div></div>
+    <div class="card"><div class="n">${s.skipped}</div><div class="k">skipped</div></div>
+    <div class="card ${s.failures_total ? "neg" : ""}"><div class="n">${s.failures_total}</div><div class="k">failures</div></div>
+    <div class="card"><div class="n">${s.avg_gain_db !== null ? "+" + s.avg_gain_db + " dB" : "&mdash;"}</div><div class="k">avg gain</div></div>
+    <div class="card"><div class="n">${s.replaced_7d}</div><div class="k">last 7 days</div></div>`;
+  $("meta").textContent = langs ? "languages: " + langs : "";
+}
+
+async function loadStatus() {
+  const s = await get("/api/status");
+  const busy = s.current && s.current.name;
+  $("dot").className = "dot" + (busy ? " live" : "");
+  $("stage").textContent = busy ? s.current.stage : "idle";
+  $("current").textContent = busy ? s.current.name : "";
+  $("queue").textContent =
+    `${s.queued} queued · window ${s.window} ${s.in_window ? "(open)" : "(closed)"} · target ${s.target_lufs} LUFS · ${s.preferred_languages.join(",") || "file default"}`;
+}
+
+function filesTable(rows) {
+  if (!rows.length) return `<div class="empty">Nothing to show yet.</div>`;
+  return `<table><thead><tr>
+      <th>File</th><th>State</th><th>Lang</th><th>Source</th>
+      <th class="num">In</th><th class="num">Out</th><th class="num">Gain</th>
+      <th>Mode</th><th>When</th></tr></thead><tbody>` +
+    rows.map(r => {
+      const gain = (r.input_i != null && r.output_i != null) ? "+" + num(r.output_i - r.input_i) : "";
+      return `<tr>
+        <td class="name">${esc(r.name)}${r.skip_reason ? `<br><span class="meta" style="color:var(--dim);font-size:11px">${esc(r.skip_reason)}</span>` : ""}</td>
+        <td><span class="tag ${esc(r.state)}">${esc(r.state)}</span></td>
+        <td>${esc(r.source_lang || "&mdash;")}</td>
+        <td>${esc(r.source_codec || "")} ${r.source_channels ? r.source_channels + "ch" : ""}</td>
+        <td class="num">${num(r.input_i)}</td>
+        <td class="num">${num(r.output_i)}</td>
+        <td class="num">${gain}</td>
+        <td>${esc(r.mode || "")}${r.measurement === "sampled" ? " <span class=tag>sampled</span>" : ""}</td>
+        <td>${ago(r.processed_at || r.updated_at)}</td></tr>`;
+    }).join("") + "</tbody></table>";
+}
+
+function runsTable(rows) {
+  if (!rows.length) return `<div class="empty">No runs recorded yet.</div>`;
+  return `<table><thead><tr>
+      <th>File</th><th>Outcome</th><th>Trigger</th><th>Mode</th>
+      <th class="num">Took</th><th>Detail</th><th>When</th></tr></thead><tbody>` +
+    rows.map(r => `<tr>
+        <td class="name">${esc(r.name)}</td>
+        <td><span class="tag ${esc(r.outcome)}">${esc(r.outcome)}</span></td>
+        <td>${esc(r.trigger || "")}</td>
+        <td>${esc(r.mode || "")}</td>
+        <td class="num">${r.seconds ? Math.round(r.seconds / 60) + "m" : ""}</td>
+        <td>${esc(r.detail || "")}</td>
+        <td>${ago(r.started_at)}</td></tr>`).join("") + "</tbody></table>";
+}
+
+async function loadTable() {
+  const q = encodeURIComponent($("q").value || "");
+  if (view === "files") {
+    const rows = await get("/api/files?limit=1000&q=" + q);
+    $("table").innerHTML = filesTable(rows);
+    $("foot").textContent = rows.length + " file(s) shown";
+  } else {
+    const rows = await get("/api/runs?limit=300");
+    $("table").innerHTML = runsTable(rows);
+    $("foot").textContent = rows.length + " run(s) shown";
+  }
+}
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("on"));
+  b.classList.add("on");
+  view = b.dataset.view;
+  loadTable();
+});
+let t; $("q").oninput = () => { clearTimeout(t); t = setTimeout(loadTable, 250); };
+
+loadSummary(); loadStatus(); loadTable();
+setInterval(loadStatus, 5000);
+setInterval(loadSummary, 30000);
+setInterval(loadTable, 30000);
+</script>
+</body>
+</html>

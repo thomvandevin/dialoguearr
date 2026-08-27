@@ -52,10 +52,11 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import requests
+
+import db
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -354,7 +355,23 @@ def cleanup_temp():
             log.error("could not remove %s: %s", stale.name, exc)
 
 
-def process(path):
+def library_of(path):
+    try:
+        return path.relative_to(MEDIA_PATH).parts[0]
+    except (ValueError, IndexError):
+        return "unknown"
+
+
+def skip_reason(info):
+    audio = [x for x in info.get("streams", []) if x.get("codec_type") == "audio"]
+    if any((x.get("tags") or {}).get("title") == TRACK_TITLE for x in audio):
+        return "already has a dialogue-boost track"
+    if any(int(x.get("channels") or 0) <= 2 for x in audio):
+        return "already has a stereo track"
+    return "no 5.1 track"
+
+
+def process(path, trigger="scan"):
     info = probe(path)
     if not info:
         return False
@@ -364,14 +381,10 @@ def process(path):
         # Only webhook-queued files reach here without being candidates, since
         # the backfill scan pre-filters. Saying why keeps a silent skip from
         # looking like a failure.
-        audio = [x for x in info.get("streams", []) if x.get("codec_type") == "audio"]
-        if any((x.get("tags") or {}).get("title") == TRACK_TITLE for x in audio):
-            reason = "already has a dialogue-boost track"
-        elif any(int(x.get("channels") or 0) <= 2 for x in audio):
-            reason = "already has a stereo track"
-        else:
-            reason = "no 5.1 track"
+        reason = skip_reason(info)
         log.info("skipping %s: %s", path.name, reason)
+        db.upsert_file(path, library=library_of(path), name=path.name,
+                       state="skipped", skip_reason=reason)
         return False
     aidx, stream = picked
 
@@ -384,40 +397,80 @@ def process(path):
     log.info("candidate: %s (%s %dch, %.0f min)", path.name,
              stream.get("codec_name"), int(stream.get("channels") or 0), duration / 60)
 
+    db.upsert_file(path, library=library_of(path), name=path.name,
+                   duration=duration, size=path.stat().st_size, state="eligible",
+                   source_lang=language_of(stream) or None,
+                   source_codec=stream.get("codec_name"),
+                   source_channels=int(stream.get("channels") or 0))
+
     if DRY_RUN:
         log.info("  DRY_RUN, not writing")
         return False
 
-    measured = analyse(path, aidx)
-    if not measured:
-        return False
-    if measured is not SINGLE_PASS:
-        log.info("  measured %s LUFS, LRA %s, peak %s dBTP",
-                 measured["input_i"], measured["input_lra"], measured["input_tp"])
-
-    mtime = path.stat().st_mtime
-    tmp = path.with_name(f".{path.stem}.audionorm{path.suffix}")
+    run_id = db.start_run(path, path.name, trigger)
+    _current.update(path=str(path), name=path.name, stage="analysing",
+                    started=db.now())
+    mode = None
     try:
-        if not encode(path, tmp, aidx, measured, n_audio):
+        measured = analyse(path, aidx)
+        if not measured:
+            db.finish_run(run_id, "failed", "analysis produced no measurement")
+            db.upsert_file(path, state="failed")
             return False
 
-        ok, detail = verify(tmp, duration)
-        if not ok:
-            log.error("  verification failed (%s), original left untouched", detail)
-            return False
+        mode = "single-pass" if measured is SINGLE_PASS else "two-pass"
+        if measured is not SINGLE_PASS:
+            log.info("  measured %s LUFS, LRA %s, peak %s dBTP",
+                     measured["input_i"], measured["input_lra"], measured["input_tp"])
+            db.upsert_file(path, input_i=float(measured["input_i"]),
+                           input_lra=float(measured["input_lra"]),
+                           input_tp=float(measured["input_tp"]),
+                           measurement="full")
 
-        if path.stat().st_mtime != mtime:
-            log.warning("  source changed while encoding, discarding result")
-            return False
+        _current["stage"] = "encoding"
+        mtime = path.stat().st_mtime
+        tmp = path.with_name(f".{path.stem}.audionorm{path.suffix}")
+        try:
+            if not encode(path, tmp, aidx, measured, n_audio):
+                db.finish_run(run_id, "failed", "encode failed", mode)
+                db.upsert_file(path, state="failed")
+                return False
 
-        os.replace(tmp, path)
-        os.chmod(path, 0o664)
-        log.info("  replaced (%s)", detail)
-        plex_refresh(path)
-        return True
+            _current["stage"] = "verifying"
+            ok, detail = verify(tmp, duration)
+            if not ok:
+                log.error("  verification failed (%s), original left untouched", detail)
+                db.finish_run(run_id, "failed", f"verification failed: {detail}", mode)
+                db.upsert_file(path, state="failed")
+                return False
+
+            if path.stat().st_mtime != mtime:
+                log.warning("  source changed while encoding, discarding result")
+                db.finish_run(run_id, "aborted", "source changed while encoding", mode)
+                return False
+
+            os.replace(tmp, path)
+            os.chmod(path, 0o664)
+            log.info("  replaced (%s)", detail)
+            db.finish_run(run_id, "replaced", detail, mode)
+            db.upsert_file(path, state="done", mode=mode, processed_at=db.now(),
+                           size=path.stat().st_size,
+                           output_i=measured_output(detail))
+            plex_refresh(path)
+            return True
+        finally:
+            if tmp.exists():
+                tmp.unlink()
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        _current.update(path=None, name=None, stage=None, started=None)
+
+
+def measured_output(detail):
+    """verify() reports the loudest sampled level, e.g. "-16.4 LUFS"."""
+    try:
+        return float(detail.split()[0])
+    except (AttributeError, ValueError, IndexError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -428,19 +481,36 @@ work = queue.Queue()
 pending = set()
 pending_lock = threading.Lock()
 
+_current = {"path": None, "name": None, "stage": None, "started": None}
 
-def enqueue(path, urgent):
+
+def status():
+    with pending_lock:
+        depth = len(pending)
+    return {
+        "current": dict(_current),
+        "queued": depth,
+        "in_window": in_window(),
+        "window": f"{WINDOW_START:02d}:00-{WINDOW_END:02d}:00",
+        "dry_run": DRY_RUN,
+        "target_lufs": TARGET_LUFS,
+        "preferred_languages": PREFERRED_LANGUAGES,
+    }
+
+
+def enqueue(path, trigger):
     with pending_lock:
         if path in pending:
             return False
         pending.add(path)
-    work.put((path, urgent))
+    work.put((path, trigger))
     return True
 
 
 def worker():
     while True:
-        path, urgent = work.get()
+        path, trigger = work.get()
+        urgent = trigger != "scan"
         try:
             # Backfill items are window-bound; the next scan re-queues whatever
             # is dropped here. Imports are never deferred.
@@ -450,18 +520,13 @@ def worker():
                 time.sleep(IMPORT_DELAY)
             if not path.is_file():
                 continue
-            process(path)
+            process(path, trigger)
         except OSError as exc:
             log.error("error handling %s: %s", path.name, exc)
         finally:
             with pending_lock:
                 pending.discard(path)
             work.task_done()
-
-
-# ---------------------------------------------------------------------------
-# Webhook
-# ---------------------------------------------------------------------------
 
 
 def media_paths(obj, found=None):
@@ -485,67 +550,38 @@ def media_paths(obj, found=None):
     return found
 
 
-class WebhookHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"ok")
-
-        try:
-            payload = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        event = payload.get("eventType", "?") if isinstance(payload, dict) else "?"
-        if event == "Test":
-            log.info("webhook test received")
-            return
-
-        for path in dict.fromkeys(media_paths(payload)):
-            if enqueue(path, urgent=True):
-                log.info("webhook (%s) queued %s", event, path.name)
-
-    def log_message(self, *args):
-        pass
 
 
-def serve():
-    server = ThreadingHTTPServer(("0.0.0.0", WEBHOOK_PORT), WebhookHandler)
-    server.serve_forever()
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def main():
-    log.info("audio-normalize starting")
-    log.info("  media=%s window=%02d:00-%02d:00 target=%.1f LUFS lra=%.1f dry_run=%s",
-             MEDIA_PATH, WINDOW_START, WINDOW_END, TARGET_LUFS, TARGET_LRA, DRY_RUN)
-
-    cleanup_temp()
-    threading.Thread(target=worker, daemon=True).start()
-    threading.Thread(target=serve, daemon=True).start()
-    log.info("  webhook listening on port %d", WEBHOOK_PORT)
-
-    while True:
-        if in_window():
-            queued = 0
-            for path in scan():
-                info = probe(path)
-                if info and surround_track(info) and enqueue(path, urgent=False):
-                    queued += 1
-            if queued:
-                log.info("backfill scan queued %d file(s)", queued)
-        time.sleep(SCAN_INTERVAL)
-
-
-if __name__ == "__main__":
+def sample_loudness(path, aidx, duration, with_pan=False, seconds=60):
+    """Loudness of a 60s sample, used to backfill files processed before the
+    database existed. Far cheaper than a full analysis pass and good enough for
+    an indicative before/after, so it is recorded as "sampled" not "full"."""
+    if duration <= seconds * 2:
+        return None
+    flt = f"{PAN},ebur128" if with_pan else "ebur128"
+    r = run(["ffmpeg", "-hide_banner", "-nostats", "-ss", str(duration * 0.4),
+             "-t", str(seconds), "-i", str(path), "-map", f"0:a:{aidx}",
+             "-af", flt, "-f", "null", "-"])
+    found = EBUR128_I.findall(r.stderr)
+    if not found or found[-1] == "-inf":
+        return None
     try:
-        main()
-    except KeyboardInterrupt:
-        log.info("shutting down")
+        return float(found[-1])
+    except ValueError:
+        return None
+
+
+def audio_streams(info):
+    return [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+
+
+def classify(info):
+    """Current state of a file for the coverage table."""
+    audio = audio_streams(info)
+    if not audio:
+        return "skipped", "no audio"
+    if any((s.get("tags") or {}).get("title") == TRACK_TITLE for s in audio):
+        return "done", None
+    if surround_track(info):
+        return "eligible", None
+    return "skipped", skip_reason(info)
