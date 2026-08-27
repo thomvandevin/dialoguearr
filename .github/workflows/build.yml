@@ -21,9 +21,18 @@ jobs:
       - run: pip install ruff -r requirements.txt
       - run: ruff check .
       - name: Import check
-        run: python -c "import db, normalize, app, main" 
+        run: python -c "import db, normalize, app, main"
         env:
           PLEX_URL: ""
+      - name: Check the page script parses
+        # A broken script still serves HTTP 200, so the smoke test cannot see it.
+        run: |
+          python - <<'PY'
+          import pathlib, re
+          html = pathlib.Path("templates/index.html").read_text()
+          pathlib.Path("/tmp/page.js").write_text(re.search(r"<script>(.*?)</script>", html, re.S).group(1))
+          PY
+          node --check /tmp/page.js
 
   smoke:
     # The image built fine while missing a module, because nothing ever ran it.

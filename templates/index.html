@@ -174,7 +174,7 @@ function filesTable(rows) {
         <td class="num">${num(r.input_i)}</td>
         <td class="num">${num(r.output_i)}</td>
         <td class="num">${gain}</td>
-        <td>${esc((r.mode || "").replace("two-pass", "2-pass").replace("single-pass", "1-pass"))}${r.measurement === "sampled" ? " <span class="tag" title="sampled, not a full-file measurement">~</span>" : ""}</td>
+        <td>${esc((r.mode || "").replace("two-pass", "2-pass").replace("single-pass", "1-pass"))}${r.measurement === "sampled" ? " <span class='tag' title='sampled, not a full-file measurement'>~</span>" : ""}</td>
         <td>${ago(r.processed_at || r.updated_at)}</td>
         <td><button class="btn tiny" onclick="reprocess('${esc(r.path)}')">redo</button>
             <button class="btn tiny warn" onclick="exclude('${esc(r.path)}', ${r.excluded ? 0 : 1})">${r.excluded ? "include" : "exclude"}</button></td></tr>`;
