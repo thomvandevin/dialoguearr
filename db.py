@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS files (
     name             TEXT,
     duration         REAL,
     size             INTEGER,
-    state            TEXT NOT NULL,
+    state            TEXT NOT NULL DEFAULT 'unknown',
     skip_reason      TEXT,
     source_lang      TEXT,
     source_codec     TEXT,
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS files (
     measurement      TEXT,
     mode             TEXT,
     processed_at     TEXT,
-    updated_at       TEXT NOT NULL
+    updated_at       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS runs (
