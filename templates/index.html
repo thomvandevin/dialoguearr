@@ -36,12 +36,13 @@
   nav button.on { background: var(--primary); border-color: var(--primary); color: hsl(225 14% 12%); font-weight: 600; }
   input[type=search] { background: var(--panel); border: 1px solid var(--line); color: var(--fg);
                        padding: 7px 12px; border-radius: 6px; font-size: 13px; min-width: 220px; }
-  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
+  .scroll { overflow: auto; max-height: 70vh; border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 13px; white-space: nowrap; }
   th { text-align: left; background: var(--panel); color: var(--dim); font-weight: 600;
        padding: 9px 12px; border-bottom: 1px solid var(--line); text-transform: uppercase;
        font-size: 11px; letter-spacing: .05em; position: sticky; top: 0; }
   td { padding: 8px 12px; border-bottom: 1px solid hsl(225 14% 22%); }
+  th:last-child, td:last-child { padding-right: 18px; }
   tr:last-child td { border-bottom: 0; }
   td.name { white-space: normal; min-width: 280px; }
   .tag { font-size: 11px; padding: 2px 7px; border-radius: 4px; background: hsl(225 14% 26%); color: var(--fg); }
@@ -104,7 +105,7 @@ async function loadSummary() {
     <div class="card"><div class="n">${s.eligible}</div><div class="k">eligible</div></div>
     <div class="card"><div class="n">${s.skipped}</div><div class="k">skipped</div></div>
     <div class="card ${s.failures_total ? "neg" : ""}"><div class="n">${s.failures_total}</div><div class="k">failures</div></div>
-    <div class="card"><div class="n">${s.avg_gain_db !== null ? "+" + s.avg_gain_db + " dB" : "&mdash;"}</div><div class="k">avg gain</div></div>
+    <div class="card"><div class="n">${s.avg_gain_db !== null ? "+" + s.avg_gain_db + " dB" : "n/a"}</div><div class="k">avg gain</div></div>
     <div class="card"><div class="n">${s.replaced_7d}</div><div class="k">last 7 days</div></div>`;
   $("meta").textContent = langs ? "languages: " + langs : "";
 }
@@ -130,7 +131,7 @@ function filesTable(rows) {
       return `<tr>
         <td class="name">${esc(r.name)}${r.skip_reason ? `<br><span class="meta" style="color:var(--dim);font-size:11px">${esc(r.skip_reason)}</span>` : ""}</td>
         <td><span class="tag ${esc(r.state)}">${esc(r.state)}</span></td>
-        <td>${esc(r.source_lang || "&mdash;")}</td>
+        <td>${r.source_lang ? esc(r.source_lang) : "<span style='color:var(--dim)'>untagged</span>"}</td>
         <td>${esc(r.source_codec || "")} ${r.source_channels ? r.source_channels + "ch" : ""}</td>
         <td class="num">${num(r.input_i)}</td>
         <td class="num">${num(r.output_i)}</td>
