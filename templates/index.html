@@ -91,7 +91,31 @@
   .hitrow:hover + .rowline { stroke-width: 3; }
   .banner { background: hsl(25 50% 22%); border: 1px solid hsl(25 60% 38%); color: hsl(25 90% 84%);
             padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
-  svg text { fill: var(--dim); font-size: 10px; }
+  /* Plain elements rather than SVG: no viewBox sizing to get wrong, and the
+     filename can sit next to its bar instead of hiding in a tooltip. */
+  .chart { padding: 14px 16px 18px; }
+  .crow { display: grid; grid-template-columns: 32% 1fr 128px; gap: 12px;
+          align-items: center; padding: 3px 0; }
+  .crow:hover { background: hsl(225 14% 22%); }
+  .cname { font-size: 12px; color: var(--fg); overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+  .ctrack { position: relative; height: 16px; }
+  .ctrack::before { content: ""; position: absolute; inset: 7px 0 auto 0; height: 2px;
+                    background: hsl(225 14% 24%); }
+  .cbar { position: absolute; top: 7px; height: 2px; border-radius: 1px; }
+  .cdot { position: absolute; top: 4px; width: 8px; height: 8px; border-radius: 50%;
+          margin-left: -4px; }
+  .cdot.src { background: hsl(225 10% 55%); }
+  .cdot.res { background: var(--primary); }
+  .ctarget { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--primary);
+             opacity: .55; }
+  .cval { font-size: 12px; color: var(--dim); text-align: right;
+          font-variant-numeric: tabular-nums; }
+  .cval b { color: var(--fg); font-weight: 600; }
+  .caxis { display: grid; grid-template-columns: 32% 1fr 128px; gap: 12px;
+           color: var(--dim); font-size: 11px; margin-bottom: 6px; }
+  .cscale { position: relative; height: 14px; }
+  .cscale span { position: absolute; transform: translateX(-50%); }
 </style>
 </head>
 <body>
@@ -245,39 +269,42 @@ function chartView(rows) {
   if (!rows.length) return `<div class="empty">Nothing measured yet.<br>
     <span class="envnote">Only files that were processed carry before and after levels.
     Files skipped because they already have a stereo track never get measured.</span></div>`;
-  const W = 900, PAD = 34;
-  // Give every row room to breathe; 68 files in 300px is 4px each.
-  const H = Math.max(320, rows.length * 9 + PAD * 2);
+
   const ins = rows.map(r => r.input_i), outs = rows.map(r => r.output_i);
-  let lo = Math.floor(Math.min(...ins, ...outs) - 1), hi = Math.ceil(Math.max(...ins, ...outs) + 1);
-  if (hi <= lo) hi = lo + 1;   // a single value would divide by zero below
-  const x = v => PAD + (v - lo) / (hi - lo) * (W - PAD * 2);
-  const y = i => PAD + i / Math.max(rows.length - 1, 1) * (H - PAD * 2);
+  let lo = Math.floor(Math.min(...ins, ...outs) - 1);
+  let hi = Math.ceil(Math.max(...ins, ...outs) + 1);
+  if (hi <= lo) hi = lo + 1;
+  const pct = v => ((v - lo) / (hi - lo)) * 100;
+
   const ticks = [];
-  for (let v = lo; v <= hi; v += 4) ticks.push(v);
-  return `<div style="padding:16px">
-    <div class="envnote" style="margin-bottom:8px">Each row is one file: left dot is the source after downmix, right dot is the result. Target is ${esc(String(TARGET))} LUFS.</div>
-    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"
-         preserveAspectRatio="xMidYMid meet"
-         style="max-width:100%;height:auto;display:block">
-      ${ticks.map(v => `<line x1="${x(v)}" y1="${PAD - 8}" x2="${x(v)}" y2="${H - PAD}" stroke="hsl(225 14% 24%)"/>
-                        <text x="${x(v)}" y="${H - PAD + 14}" text-anchor="middle">${v}</text>`).join("")}
-      <line x1="${x(TARGET)}" y1="${PAD - 8}" x2="${x(TARGET)}" y2="${H - PAD}" stroke="hsl(25 89% 62%)" stroke-dasharray="4 3"/>
-      ${rows.map((r, i) => {
-        const gain = (r.output_i - r.input_i).toFixed(1);
-        const lo = Math.min(r.input_i, r.output_i), hi = Math.max(r.input_i, r.output_i);
-        const tip = `${r.name}\nsource ${num(r.input_i)} LUFS, result ${num(r.output_i)} LUFS\n`
-                  + `range ${num(lo)} to ${num(hi)}, gain ${gain > 0 ? "+" : ""}${gain} dB`
-                  + `${r.source_lang ? `\nlanguage ${r.source_lang}` : ""}`;
-        const band = (H - PAD * 2) / Math.max(rows.length, 1);
-        return `<g><title>${esc(tip)}</title>
-          <rect class="hitrow" x="${PAD}" y="${y(i) - band / 2}" width="${W - PAD * 2}" height="${band}"/>
-          <line class="rowline" x1="${x(r.input_i)}" y1="${y(i)}" x2="${x(r.output_i)}" y2="${y(i)}"
-                stroke="${r.output_i > r.input_i ? "hsl(145 45% 40%)" : "hsl(359 55% 45%)"}" stroke-width="1.4"/>
-          <circle cx="${x(r.input_i)}" cy="${y(i)}" r="2" fill="hsl(225 10% 55%)"/>
-          <circle cx="${x(r.output_i)}" cy="${y(i)}" r="2.6" fill="hsl(25 89% 62%)"/></g>`;
-      }).join("")}
-    </svg></div>`;
+  for (let v = Math.ceil(lo / 4) * 4; v <= hi; v += 4) ticks.push(v);
+
+  return `<div class="chart">
+    <div class="envnote" style="margin-bottom:10px">Grey dot is the source after downmix,
+      orange dot is the result. The dashed line is the ${esc(String(TARGET))} LUFS target.</div>
+    <div class="caxis"><div></div>
+      <div class="cscale">${ticks.map(v => `<span style="left:${pct(v)}%">${v}</span>`).join("")}</div>
+      <div></div></div>
+    ${rows.map(r => {
+      const a = pct(Math.min(r.input_i, r.output_i)), b = pct(Math.max(r.input_i, r.output_i));
+      const up = r.output_i > r.input_i;
+      const gain = (r.output_i - r.input_i).toFixed(1);
+      const tip = `${r.name}\nsource ${num(r.input_i)} LUFS, result ${num(r.output_i)} LUFS\n`
+                + `gain ${gain > 0 ? "+" : ""}${gain} dB`
+                + `${r.source_lang ? `, language ${r.source_lang}` : ""}`;
+      return `<div class="crow" title="${esc(tip)}">
+        <div class="cname">${esc(r.name)}</div>
+        <div class="ctrack">
+          <div class="ctarget" style="left:${pct(TARGET)}%"></div>
+          <div class="cbar" style="left:${a}%;width:${Math.max(b - a, 0.2)}%;
+               background:${up ? "hsl(145 45% 42%)" : "hsl(359 55% 48%)"}"></div>
+          <div class="cdot src" style="left:${pct(r.input_i)}%"></div>
+          <div class="cdot res" style="left:${pct(r.output_i)}%"></div>
+        </div>
+        <div class="cval">${num(r.input_i)} to <b>${num(r.output_i)}</b></div>
+      </div>`;
+    }).join("")}
+  </div>`;
 }
 
 let TARGET = -16;
