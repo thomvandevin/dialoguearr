@@ -61,9 +61,10 @@
          padding: 7px 13px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .btn:hover { border-color: var(--primary); color: var(--primary); }
   .btn.warn { color: var(--neg); } .btn.tiny { padding: 3px 8px; font-size: 11px; }
-  .setgroup { margin: 18px 0; }
+  .setgroup { margin: 0; padding: 18px 16px 6px; }
+  .setgroup + .setgroup { border-top: 1px solid var(--line); }
   .setgroup h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
-                 color: var(--dim); margin: 0 0 10px; }
+                 color: var(--dim); margin: 0 0 12px; }
   .setrow { display: grid; grid-template-columns: 210px 160px 1fr auto; gap: 12px;
             align-items: center; padding: 9px 12px; border-bottom: 1px solid hsl(225 14% 22%); }
   .setrow:last-child { border-bottom: 0; }
@@ -74,6 +75,20 @@
   .setrow.over .key::after { content: " override"; color: var(--primary); font-size: 10px;
                              text-transform: uppercase; letter-spacing: .05em; }
   .envnote { color: var(--dim); font-size: 11px; }
+  .switch { display: inline-flex; align-items: center; cursor: pointer; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch span { width: 40px; height: 22px; border-radius: 11px; background: var(--line);
+                 position: relative; transition: background .15s; }
+  .switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+                        border-radius: 50%; background: var(--dim); transition: transform .15s, background .15s; }
+  .switch input:checked + span { background: hsl(25 60% 34%); }
+  .switch input:checked + span::after { transform: translateX(18px); background: var(--primary); }
+  .repo { color: var(--dim); text-decoration: none; font-size: 13px; border: 1px solid var(--line);
+          padding: 7px 13px; border-radius: 6px; }
+  .repo:hover { color: var(--primary); border-color: var(--primary); }
+  h1 { cursor: pointer; }
+  .hitrow { fill: transparent; }
+  .hitrow:hover + .rowline { stroke-width: 3; }
   .banner { background: hsl(25 50% 22%); border: 1px solid hsl(25 60% 38%); color: hsl(25 90% 84%);
             padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
   svg text { fill: var(--dim); font-size: 10px; }
@@ -82,7 +97,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>dialogue<span>arr</span></h1>
+    <h1 id="home" title="Back to files">dialogue<span>arr</span></h1>
     <div class="meta" id="meta"></div>
   </header>
 
@@ -103,7 +118,8 @@
     <span class="actions">
       <button class="btn" id="btn-scan">Scan now</button>
       <button class="btn" id="btn-pause">Pause</button>
-      <button class="btn warn" id="btn-retry">Retry failed</button>
+      <button class="btn warn" id="btn-retry" style="display:none">Retry failed</button>
+      <a class="repo" href="https://github.com/thomvandevin/dialoguearr" target="_blank" rel="noopener">Repository</a>
     </span>
   </nav>
   <div id="banner"></div>
@@ -140,6 +156,8 @@ async function loadSummary() {
     <div class="card"><div class="n">${s.avg_gain_db !== null ? "+" + s.avg_gain_db + " dB" : "n/a"}</div><div class="k">avg gain</div></div>
     <div class="card"><div class="n">${s.replaced_7d}</div><div class="k">last 7 days</div></div>`;
   $("meta").textContent = langs ? "languages: " + langs : "";
+  $("btn-retry").style.display = s.failures_total > 0 ? "" : "none";
+  $("btn-retry").textContent = `Retry ${s.failures_total} failed`;
 }
 
 async function loadStatus() {
@@ -208,10 +226,13 @@ function settingsView(rows) {
       <div class="setrow ${r.overridden ? "on over" : ""}">
         <div><div class="key">${esc(r.key)}</div>
              <div class="envnote">${r.env_var ? esc(r.env_var) : "runtime only"}</div></div>
-        <div><input id="set-${esc(r.key)}" value="${r.override ?? (r.value ?? "")}"
-                    placeholder="${r.env_value ?? "unset"}"></div>
+        <div>${r.type === "bool"
+          ? `<label class="switch"><input type="checkbox" id="set-${esc(r.key)}" data-bool="1"
+               ${r.value ? "checked" : ""} onchange="saveSetting('${esc(r.key)}')"><span></span></label>`
+          : `<input id="set-${esc(r.key)}" value="${r.override ?? (r.value ?? "")}"
+               placeholder="${r.env_value ?? "unset"}">`}</div>
         <div class="help">${esc(r.help)}${r.overridden ? ` <span class="envnote">(compose says ${esc(String(r.env_value))})</span>` : ""}</div>
-        <div><button class="btn tiny" onclick="saveSetting('${esc(r.key)}')">save</button>
+        <div>${r.type === "bool" ? "" : `<button class="btn tiny" onclick="saveSetting('${esc(r.key)}')">save</button>`}
              ${r.overridden ? `<button class="btn tiny warn" onclick="resetSetting('${esc(r.key)}')">reset</button>` : ""}</div>
       </div>`).join("") + `</div>`).join("");
 }
@@ -231,18 +252,28 @@ function chartView(rows) {
       ${ticks.map(v => `<line x1="${x(v)}" y1="${PAD - 8}" x2="${x(v)}" y2="${H - PAD}" stroke="hsl(225 14% 24%)"/>
                         <text x="${x(v)}" y="${H - PAD + 14}" text-anchor="middle">${v}</text>`).join("")}
       <line x1="${x(TARGET)}" y1="${PAD - 8}" x2="${x(TARGET)}" y2="${H - PAD}" stroke="hsl(25 89% 62%)" stroke-dasharray="4 3"/>
-      ${rows.map((r, i) => `
-        <line x1="${x(r.input_i)}" y1="${y(i)}" x2="${x(r.output_i)}" y2="${y(i)}"
-              stroke="${r.output_i > r.input_i ? "hsl(145 45% 40%)" : "hsl(359 55% 45%)"}" stroke-width="1.4"/>
-        <circle cx="${x(r.input_i)}" cy="${y(i)}" r="2" fill="hsl(225 10% 55%)"/>
-        <circle cx="${x(r.output_i)}" cy="${y(i)}" r="2.6" fill="hsl(25 89% 62%)"><title>${esc(r.name)}: ${num(r.input_i)} to ${num(r.output_i)}</title></circle>`).join("")}
+      ${rows.map((r, i) => {
+        const gain = (r.output_i - r.input_i).toFixed(1);
+        const lo = Math.min(r.input_i, r.output_i), hi = Math.max(r.input_i, r.output_i);
+        const tip = `${r.name}\nsource ${num(r.input_i)} LUFS, result ${num(r.output_i)} LUFS\n`
+                  + `range ${num(lo)} to ${num(hi)}, gain ${gain > 0 ? "+" : ""}${gain} dB`
+                  + `${r.source_lang ? `\nlanguage ${r.source_lang}` : ""}`;
+        const band = (H - PAD * 2) / Math.max(rows.length, 1);
+        return `<g><title>${esc(tip)}</title>
+          <rect class="hitrow" x="${PAD}" y="${y(i) - band / 2}" width="${W - PAD * 2}" height="${band}"/>
+          <line class="rowline" x1="${x(r.input_i)}" y1="${y(i)}" x2="${x(r.output_i)}" y2="${y(i)}"
+                stroke="${r.output_i > r.input_i ? "hsl(145 45% 40%)" : "hsl(359 55% 45%)"}" stroke-width="1.4"/>
+          <circle cx="${x(r.input_i)}" cy="${y(i)}" r="2" fill="hsl(225 10% 55%)"/>
+          <circle cx="${x(r.output_i)}" cy="${y(i)}" r="2.6" fill="hsl(25 89% 62%)"/></g>`;
+      }).join("")}
     </svg></div>`;
 }
 
 let TARGET = -16;
 
 async function saveSetting(key) {
-  const v = document.getElementById("set-" + key).value;
+  const el = document.getElementById("set-" + key);
+  const v = el.dataset.bool ? (el.checked ? "true" : "false") : el.value;
   const r = await fetch("/api/settings", {method: "PUT", headers: {"Content-Type": "application/json"},
                                           body: JSON.stringify({[key]: v === "" ? null : v})});
   banner(r.ok ? `saved ${key}` : `failed to save ${key}`);
@@ -303,6 +334,11 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 });
 let t; $("q").oninput = () => { clearTimeout(t); t = setTimeout(loadTable, 250); };
 
+$("home").onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("on"));
+  document.querySelector('nav button[data-view="files"]').classList.add("on");
+  view = "files"; loadTable();
+};
 $("btn-scan").onclick = async () => { await fetch("/api/scan", {method: "POST"}); banner("scan started"); };
 $("btn-retry").onclick = async () => {
   const r = await (await fetch("/api/retry-failed", {method: "POST"})).json();
@@ -318,7 +354,7 @@ $("btn-pause").onclick = async () => {
 loadSummary(); loadStatus(); loadTable();
 setInterval(loadStatus, 5000);
 setInterval(loadSummary, 30000);
-setInterval(loadTable, 30000);
+setInterval(() => { if (view !== "settings") loadTable(); }, 30000);
 </script>
 </body>
 </html>
