@@ -43,20 +43,20 @@ jobs:
       - run: docker build -t dialoguearr:smoke .
       - name: Boot the image and check it serves
         run: |
-          docker run -d --name smoke -p 8080:8080 \
+          docker run -d --name smoke -p 7373:7373 \
             -e DB_PATH=/tmp/smoke.db -e MEDIA_PATH=/tmp -e PLEX_URL= \
             dialoguearr:smoke
           for i in $(seq 1 30); do
-            curl -fsS http://localhost:8080/healthz >/dev/null 2>&1 && break
+            curl -fsS http://localhost:7373/healthz >/dev/null 2>&1 && break
             sleep 2
           done
           echo "--- endpoints ---"
           for ep in /healthz /api/summary /api/status /api/settings /api/files /api/runs /api/chart; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8080$ep")
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:7373$ep")
             echo "  $ep -> $code"
             [ "$code" = "200" ] || { docker logs smoke; exit 1; }
           done
-          curl -fsS http://localhost:8080/ | grep -q "<title>dialoguearr</title>" || exit 1
+          curl -fsS http://localhost:7373/ | grep -q "<title>dialoguearr</title>" || exit 1
           docker logs smoke 2>&1 | grep -iE "Traceback|ModuleNotFound|Error" && exit 1
           echo "smoke test passed"
 

@@ -68,12 +68,12 @@ services:
       - /path/to/media:/data/media      # must be writable, files are rewritten in place
       - /path/to/state:/state           # SQLite database
     ports:
-      - "8085:8080"
+      - "7373:7373"
     restart: unless-stopped
 ```
 
 Then add a **Webhook** connection in Sonarr and Radarr pointing at
-`http://dialoguearr:8080/`, method POST, on Download and Upgrade.
+`http://dialoguearr:7373/`, method POST, on Download and Upgrade.
 
 ## Configuration
 
@@ -81,7 +81,7 @@ Then add a **Webhook** connection in Sonarr and Radarr pointing at
 |---|---|---|
 | `MEDIA_PATH` | `/data/media` | Root directory to scan |
 | `DB_PATH` | `/state/dialoguearr.db` | SQLite database location |
-| `PORT` | `8080` | HTTP port |
+| `PORT` | `7373` | HTTP port |
 | `SCAN_INTERVAL` | `3600` | Seconds between backfill scans |
 | `WINDOW_START` / `WINDOW_END` | `3` / `8` | Hours the backfill scan may run. Webhook imports ignore this |
 | `IMPORT_DELAY` | `60` | Seconds to let an imported file settle |

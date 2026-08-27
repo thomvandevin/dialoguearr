@@ -7,7 +7,7 @@ from waitress import serve
 
 import app as web
 
-PORT = int(os.environ.get("PORT", "8080"))
+PORT = int(os.environ.get("PORT", "7373"))
 
 if __name__ == "__main__":
     web.start_background()

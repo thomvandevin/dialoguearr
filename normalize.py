@@ -20,7 +20,7 @@ confined to WINDOW_START..WINDOW_END so bulk work happens overnight.
 Environment variables:
     MEDIA_PATH        Root directory to scan (default: /data/media)
     SCAN_INTERVAL     Seconds between backfill scans (default: 3600)
-    WEBHOOK_PORT      Port for the Sonarr/Radarr webhook (default: 8080)
+    PORT              HTTP port (default: 7373)
     IMPORT_DELAY      Seconds to let an imported file settle (default: 60)
     WINDOW_START      Hour processing may begin, 0-23 (default: 3)
     WINDOW_END        Hour processing must stop, 0-23 (default: 8)
@@ -64,7 +64,7 @@ import settings
 # ---------------------------------------------------------------------------
 
 MEDIA_PATH = Path(os.environ.get("MEDIA_PATH", "/data/media"))
-WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8080"))
+
 
 
 
