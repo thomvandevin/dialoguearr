@@ -15,6 +15,7 @@ from flask import Flask, jsonify, render_template, request
 
 import db
 import normalize as n
+import settings
 
 log = logging.getLogger("dialoguearr.web")
 
@@ -33,7 +34,7 @@ def seed():
         info = n.probe(path)
         if not info:
             continue
-        state, reason = n.classify(info)
+        state, reason = n.classify_with_overrides(path, info)
         fields = {"library": n.library_of(path), "name": path.name,
                   "state": state, "skip_reason": reason}
         audio = n.audio_streams(info)
@@ -92,7 +93,7 @@ def catalogue():
             backfill()
         except Exception:
             log.exception("catalogue pass failed")
-        time.sleep(max(n.SCAN_INTERVAL, 3600) * 6)
+        time.sleep(max(settings.get("scan_interval"), 3600) * 6)
 
 
 def backfill_scan():
@@ -101,16 +102,17 @@ def backfill_scan():
         if n.in_window():
             queued = 0
             for path in n.scan():
-                info = n.probe(path)
-                if info and n.surround_track(info) and n.enqueue(path, "scan"):
+                if n.candidate(path) and n.enqueue(path, "scan"):
                     queued += 1
             if queued:
                 log.info("backfill scan queued %d file(s)", queued)
-        time.sleep(n.SCAN_INTERVAL)
+        time.sleep(settings.get("scan_interval"))
 
 
 def start_background():
     db.init()
+    settings.refresh()
+    settings.log_effective()
     n.cleanup_temp()
     for target in (n.worker, backfill_scan, catalogue):
         threading.Thread(target=target, daemon=True).start()
@@ -162,6 +164,85 @@ def api_files():
 @app.get("/api/runs")
 def api_runs():
     return jsonify(db.list_runs(limit=min(int(request.args.get("limit", 100)), 1000)))
+
+
+@app.get("/api/settings")
+def api_settings():
+    return jsonify(settings.describe())
+
+
+@app.put("/api/settings")
+def api_settings_update():
+    body = request.get_json(silent=True) or {}
+    changed = []
+    for key, value in body.items():
+        if key not in settings.SPEC:
+            return jsonify({"error": f"unknown setting {key}"}), 400
+        try:
+            settings.set(key, value)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": f"{key}: {exc}"}), 400
+        changed.append(key)
+    settings.log_effective()
+    return jsonify({"changed": changed, "settings": settings.describe()})
+
+
+@app.get("/api/chart")
+def api_chart():
+    return jsonify(db.gain_distribution())
+
+
+@app.post("/api/files/<path:target>/reprocess")
+def api_reprocess(target):
+    path = n.Path("/" + target.lstrip("/"))
+    if not path.is_file():
+        return jsonify({"error": "not found"}), 404
+    db.reset_state(path)
+    n.enqueue(path, "manual")
+    return jsonify({"queued": str(path)})
+
+
+@app.put("/api/files/<path:target>")
+def api_file_override(target):
+    path = n.Path("/" + target.lstrip("/"))
+    body = request.get_json(silent=True) or {}
+    fields = {}
+    if "force_track" in body:
+        raw = body["force_track"]
+        fields["force_track"] = None if raw in (None, "") else int(raw)
+    if "force_language" in body:
+        fields["force_language"] = body["force_language"] or None
+    if "excluded" in body:
+        fields["excluded"] = 1 if body["excluded"] else 0
+    if not fields:
+        return jsonify({"error": "nothing to set"}), 400
+    db.upsert_file(path, **fields)
+    return jsonify(db.get_file(path))
+
+
+@app.post("/api/scan")
+def api_scan():
+    threading.Thread(target=_manual_scan, daemon=True).start()
+    return jsonify({"started": True})
+
+
+def _manual_scan():
+    queued = 0
+    for path in n.scan():
+        if n.candidate(path) and n.enqueue(path, "manual"):
+            queued += 1
+    log.info("manual scan queued %d file(s)", queued)
+
+
+@app.post("/api/retry-failed")
+def api_retry_failed():
+    rows = db.list_files(state="failed", limit=1000)
+    for row in rows:
+        path = n.Path(row["path"])
+        if path.is_file():
+            db.reset_state(path)
+            n.enqueue(path, "manual")
+    return jsonify({"requeued": len(rows)})
 
 
 @app.get("/healthz")

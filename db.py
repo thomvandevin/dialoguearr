@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS runs (
     seconds      REAL
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_state ON files(state);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
 """
@@ -70,12 +75,64 @@ def connect():
         conn.close()
 
 
+# Added after the first release; ALTER TABLE keeps existing databases usable.
+LATER_COLUMNS = [
+    ("files", "force_track", "INTEGER"),
+    ("files", "force_language", "TEXT"),
+    ("files", "excluded", "INTEGER DEFAULT 0"),
+    ("files", "existing_stereo_i", "REAL"),
+]
+
+
 def init():
     with connect() as conn:
         # WAL lets the web thread read while the worker is mid-write.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
+        for table, column, decl in LATER_COLUMNS:
+            have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         conn.commit()
+
+
+def get_settings():
+    with connect() as conn:
+        return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+
+
+def set_setting(key, value):
+    with _write_lock, connect() as conn:
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE key=?", (key,))
+        else:
+            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (key, str(value)))
+        conn.commit()
+
+
+def get_file(path):
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM files WHERE path=?", (str(path),)).fetchone()
+        return dict(row) if row else None
+
+
+def reset_state(path, state="eligible"):
+    """Clear the processed marker so a file is picked up again."""
+    with _write_lock, connect() as conn:
+        conn.execute("UPDATE files SET state=?, updated_at=? WHERE path=?",
+                     (state, now(), str(path)))
+        conn.commit()
+
+
+def gain_distribution():
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT name, library, input_i, output_i, source_lang, "
+            "       (output_i - input_i) AS gain "
+            "FROM files WHERE input_i IS NOT NULL AND output_i IS NOT NULL "
+            "ORDER BY gain DESC")]
 
 
 def upsert_file(path, **fields):

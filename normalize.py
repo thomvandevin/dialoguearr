@@ -57,32 +57,19 @@ from pathlib import Path
 import requests
 
 import db
+import settings
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 MEDIA_PATH = Path(os.environ.get("MEDIA_PATH", "/data/media"))
-SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "3600"))
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8080"))
-IMPORT_DELAY = int(os.environ.get("IMPORT_DELAY", "60"))
 
-WINDOW_START = int(os.environ.get("WINDOW_START", "3"))
-WINDOW_END = int(os.environ.get("WINDOW_END", "8"))
 
-TARGET_LUFS = float(os.environ.get("TARGET_LUFS", "-16"))
-TARGET_LRA = float(os.environ.get("TARGET_LRA", "8"))
-TARGET_TP = float(os.environ.get("TARGET_TP", "-1.5"))
 
-PAN_CENTRE = float(os.environ.get("PAN_CENTRE", "0.9"))
-PAN_FRONT = float(os.environ.get("PAN_FRONT", "0.55"))
-PAN_SURROUND = float(os.environ.get("PAN_SURROUND", "0.25"))
 
-AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "256k")
 TRACK_TITLE = os.environ.get("TRACK_TITLE", "Stereo (dialogue boost)")
-PREFERRED_LANGUAGES = [x.strip().lower()
-                       for x in os.environ.get("PREFERRED_LANGUAGES", "").split(",")
-                       if x.strip()]
 
 # Files tag languages inconsistently as 2- or 3-letter codes.
 LANG_ALIASES = {"ja": "jpn", "jp": "jpn", "en": "eng", "es": "spa", "fr": "fra",
@@ -91,22 +78,31 @@ LANG_ALIASES = {"ja": "jpn", "jp": "jpn", "en": "eng", "es": "spa", "fr": "fra",
 PLEX_URL = os.environ.get("PLEX_URL", "").rstrip("/")
 PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
 
-DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
 CONTAINERS = {".mkv", ".mp4", ".m4v"}
 DURATION_TOLERANCE = 2.0
 SILENCE_FLOOR = -60.0  # ebur128 reports -70 for digital silence
 
-# Channel indices rather than names: ffmpeg labels the surround pair BL/BR for
-# 5.1 but SL/SR for 5.1(side), while the channel order is identical in both.
-PAN = (
-    "pan=stereo|"
-    f"c0={PAN_CENTRE}*c2+{PAN_FRONT}*c0+{PAN_SURROUND}*c4|"
-    f"c1={PAN_CENTRE}*c2+{PAN_FRONT}*c1+{PAN_SURROUND}*c5"
-)
 
 SINGLE_PASS = object()
+
+def preferred_languages():
+    return [x.strip().lower()
+            for x in (settings.get("preferred_languages") or "").split(",") if x.strip()]
+
+
+def pan_filter():
+    """Centre-forward downmix with LFE discarded.
+
+    Channel indices rather than names: ffmpeg labels the surround pair BL/BR
+    for 5.1 but SL/SR for 5.1(side), while the channel order is identical.
+    """
+    c = settings.get("pan_centre")
+    f = settings.get("pan_front")
+    r = settings.get("pan_surround")
+    return (f"pan=stereo|c0={c}*c2+{f}*c0+{r}*c4|c1={c}*c2+{f}*c1+{r}*c5")
+
 
 LOUDNORM_JSON = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.S)
 EBUR128_I = re.compile(r"I:\s+(-?[\d.]+|-inf)\s+LUFS")
@@ -146,24 +142,38 @@ def language_of(stream):
     return LANG_ALIASES.get(code, code)
 
 
-def surround_track(info):
+def surround_track(info, allow_existing_stereo=False, override=None):
     """Return (audio-relative index, stream) of the 5.1 track to convert."""
-    audio = [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+    audio = audio_streams(info)
     if not audio:
         return None
     if any((s.get("tags") or {}).get("title") == TRACK_TITLE for s in audio):
         return None
-    if any(int(s.get("channels") or 0) <= 2 for s in audio):
+    if not allow_existing_stereo and any(int(s.get("channels") or 0) <= 2 for s in audio):
         return None
+
     surround = [(i, s) for i, s in enumerate(audio)
                 if int(s.get("channels") or 0) == 6]
     if not surround:
         return None
 
+    override = override or {}
+
+    # An explicit per-file choice wins over everything, which is the escape
+    # hatch for releases whose tracks carry no language tags at all.
+    forced = override.get("force_track")
+    if forced is not None:
+        for i, s in surround:
+            if i == int(forced):
+                return i, s
+
+    wanted = override.get("force_language")
+    preferred = [wanted.strip().lower()] if wanted else preferred_languages()
+
     # Most of these files carry several dubs in arbitrary track order, so an
     # explicit preference wins, then whichever track the release marked
     # default, so the new track matches the language that played before.
-    for want in PREFERRED_LANGUAGES:
+    for want in preferred:
         for i, s in surround:
             if language_of(s) == LANG_ALIASES.get(want, want):
                 return i, s
@@ -173,10 +183,38 @@ def surround_track(info):
     return surround[0]
 
 
+def existing_stereo_level(path, info, duration):
+    """Level of a file's existing stereo track, measured once and remembered.
+
+    Only consulted when restereo_below is set, since it costs a decode.
+    """
+    audio = audio_streams(info)
+    idx = next((i for i, s in enumerate(audio)
+                if int(s.get("channels") or 0) <= 2), None)
+    if idx is None:
+        return None
+    cached = db.get_file(path) or {}
+    if cached.get("existing_stereo_i") is not None:
+        return cached["existing_stereo_i"]
+    level = sample_loudness(path, idx, duration)
+    if level is not None:
+        db.upsert_file(path, existing_stereo_i=level)
+    return level
+
+
+def wants_reprocessing(path, info, duration):
+    """True when an existing stereo track is too quiet to count as a fallback."""
+    threshold = settings.get("restereo_below")
+    if threshold is None:
+        return False
+    level = existing_stereo_level(path, info, duration)
+    return level is not None and level < threshold
+
+
 def analyse(path, aidx):
     """First loudnorm pass, returning the measured values for the second."""
-    flt = (f"{PAN},loudnorm=I={TARGET_LUFS}:LRA={TARGET_LRA}"
-           f":TP={TARGET_TP}:print_format=json")
+    flt = (f"{pan_filter()},loudnorm=I={settings.get('target_lufs')}"
+           f":LRA={settings.get('target_lra')}:TP={settings.get('target_tp')}:print_format=json")
     r = run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
              "-map", f"0:a:{aidx}", "-af", flt, "-f", "null", "-"])
     m = LOUDNORM_JSON.search(r.stderr)
@@ -203,7 +241,8 @@ def analyse(path, aidx):
 
 
 def encode(src, dst, aidx, measured, n_audio):
-    flt = f"{PAN},loudnorm=I={TARGET_LUFS}:LRA={TARGET_LRA}:TP={TARGET_TP}"
+    flt = (f"{pan_filter()},loudnorm=I={settings.get('target_lufs')}"
+           f":LRA={settings.get('target_lra')}:TP={settings.get('target_tp')}")
     if measured is not SINGLE_PASS:
         flt += (f":measured_I={measured['input_i']}"
                 f":measured_LRA={measured['input_lra']}"
@@ -216,7 +255,7 @@ def encode(src, dst, aidx, measured, n_audio):
            "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0",
            "-c", "copy", "-max_muxing_queue_size", "4096",
            # loudnorm resamples to 192kHz internally, so pin the rate back.
-           "-c:a:0", "aac", "-b:a:0", AUDIO_BITRATE, "-ar:a:0", "48000",
+           "-c:a:0", "aac", "-b:a:0", settings.get("audio_bitrate"), "-ar:a:0", "48000",
            "-filter:a:0", flt,
            "-metadata:s:a:0", f"title={TRACK_TITLE}",
            "-disposition:a:0", "default"]
@@ -327,12 +366,13 @@ def plex_refresh(path):
 
 
 def in_window():
-    if WINDOW_START == WINDOW_END:
+    start, end = settings.get("window_start"), settings.get("window_end")
+    if start == end:
         return True
     hour = datetime.now().hour
-    if WINDOW_START < WINDOW_END:
-        return WINDOW_START <= hour < WINDOW_END
-    return hour >= WINDOW_START or hour < WINDOW_END
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
 
 
 def scan():
@@ -371,12 +411,29 @@ def skip_reason(info):
     return "no 5.1 track"
 
 
+def candidate(path, info=None):
+    """The track to convert, honouring per-file overrides and the threshold."""
+    info = info if info is not None else probe(path)
+    if not info:
+        return None
+    row = db.get_file(path) or {}
+    if row.get("excluded"):
+        return None
+    duration = float(info.get("format", {}).get("duration") or 0)
+    allow = wants_reprocessing(path, info, duration) if duration > 0 else False
+    return surround_track(info, allow_existing_stereo=allow, override=row)
+
+
 def process(path, trigger="scan"):
     info = probe(path)
     if not info:
         return False
 
-    picked = surround_track(info)
+    if (db.get_file(path) or {}).get("excluded"):
+        log.info("skipping %s: excluded", path.name)
+        return False
+
+    picked = candidate(path, info)
     if not picked:
         # Only webhook-queued files reach here without being candidates, since
         # the backfill scan pre-filters. Saying why keeps a silent skip from
@@ -403,7 +460,7 @@ def process(path, trigger="scan"):
                    source_codec=stream.get("codec_name"),
                    source_channels=int(stream.get("channels") or 0))
 
-    if DRY_RUN:
+    if settings.get("dry_run"):
         log.info("  DRY_RUN, not writing")
         return False
 
@@ -491,10 +548,11 @@ def status():
         "current": dict(_current),
         "queued": depth,
         "in_window": in_window(),
-        "window": f"{WINDOW_START:02d}:00-{WINDOW_END:02d}:00",
-        "dry_run": DRY_RUN,
-        "target_lufs": TARGET_LUFS,
-        "preferred_languages": PREFERRED_LANGUAGES,
+        "window": f"{settings.get('window_start'):02d}:00-{settings.get('window_end'):02d}:00",
+        "dry_run": settings.get("dry_run"),
+        "paused": settings.get("paused"),
+        "target_lufs": settings.get("target_lufs"),
+        "preferred_languages": preferred_languages(),
     }
 
 
@@ -511,13 +569,16 @@ def worker():
     while True:
         path, trigger = work.get()
         urgent = trigger != "scan"
+        while settings.get("paused") and trigger != "manual":
+            time.sleep(10)
         try:
             # Backfill items are window-bound; the next scan re-queues whatever
             # is dropped here. Imports are never deferred.
             if not urgent and not in_window():
                 continue
-            if urgent and IMPORT_DELAY:
-                time.sleep(IMPORT_DELAY)
+            delay = settings.get("import_delay")
+            if urgent and delay:
+                time.sleep(delay)
             if not path.is_file():
                 continue
             process(path, trigger)
@@ -558,7 +619,7 @@ def sample_loudness(path, aidx, duration, with_pan=False, seconds=60):
     an indicative before/after, so it is recorded as "sampled" not "full"."""
     if duration <= seconds * 2:
         return None
-    flt = f"{PAN},ebur128" if with_pan else "ebur128"
+    flt = f"{pan_filter()},ebur128" if with_pan else "ebur128"
     r = run(["ffmpeg", "-hide_banner", "-nostats", "-ss", str(duration * 0.4),
              "-t", str(seconds), "-i", str(path), "-map", f"0:a:{aidx}",
              "-af", flt, "-f", "null", "-"])
@@ -585,3 +646,15 @@ def classify(info):
     if surround_track(info):
         return "eligible", None
     return "skipped", skip_reason(info)
+
+
+def classify_with_overrides(path, info):
+    row = db.get_file(path) or {}
+    if row.get("excluded"):
+        return "excluded", "excluded by hand"
+    state, reason = classify(info)
+    if state == "skipped" and reason == "already has a stereo track":
+        duration = float(info.get("format", {}).get("duration") or 0)
+        if duration > 0 and wants_reprocessing(path, info, duration):
+            return "eligible", None
+    return state, reason
