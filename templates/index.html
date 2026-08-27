@@ -39,15 +39,15 @@
                        padding: 7px 12px; border-radius: 6px; font-size: 13px; min-width: 220px; }
   .scroll { overflow: auto; max-height: 70vh; border: 1px solid var(--line); border-radius: 8px; }
   .scroll.free { max-height: none; overflow: visible; }
-  table { border-collapse: collapse; width: 100%; table-layout: auto; font-size: 13px; }
-  th, td { white-space: nowrap; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 13px; }
+  th, td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   th { text-align: left; background: var(--panel); color: var(--dim); font-weight: 600;
        padding: 9px 12px; border-bottom: 1px solid var(--line); text-transform: uppercase;
        font-size: 11px; letter-spacing: .05em; position: sticky; top: 0; }
   td { padding: 8px 12px; border-bottom: 1px solid hsl(225 14% 22%); }
   th:last-child, td:last-child { padding-right: 18px; }
   tr:last-child td { border-bottom: 0; }
-  td.name { white-space: normal; width: 38%; min-width: 200px; }
+  td.name { white-space: normal; overflow-wrap: anywhere; }
   .tag { font-size: 11px; padding: 2px 7px; border-radius: 4px; background: hsl(225 14% 26%); color: var(--fg); }
   .tag.done { background: hsl(145 35% 26%); color: hsl(145 60% 82%); }
   .tag.eligible { background: hsl(25 50% 28%); color: hsl(25 85% 80%); }
@@ -156,7 +156,11 @@ async function loadStatus() {
 
 function filesTable(rows) {
   if (!rows.length) return `<div class="empty">Nothing to show yet.</div>`;
-  return `<table><thead><tr>
+  return `<table>
+    <colgroup><col style="width:30%"><col style="width:7%"><col style="width:8%">
+      <col style="width:8%"><col style="width:6%"><col style="width:6%"><col style="width:6%">
+      <col style="width:8%"><col style="width:8%"><col style="width:13%"></colgroup>
+    <thead><tr>
       <th>File</th><th>State</th><th>Lang</th><th>Source</th>
       <th class="num">In</th><th class="num">Out</th><th class="num">Gain</th>
       <th>Mode</th><th>When</th><th></th></tr></thead><tbody>` +
@@ -170,7 +174,7 @@ function filesTable(rows) {
         <td class="num">${num(r.input_i)}</td>
         <td class="num">${num(r.output_i)}</td>
         <td class="num">${gain}</td>
-        <td>${esc(r.mode || "")}${r.measurement === "sampled" ? " <span class=tag>sampled</span>" : ""}</td>
+        <td>${esc((r.mode || "").replace("two-pass", "2-pass").replace("single-pass", "1-pass"))}${r.measurement === "sampled" ? " <span class="tag" title="sampled, not a full-file measurement">~</span>" : ""}</td>
         <td>${ago(r.processed_at || r.updated_at)}</td>
         <td><button class="btn tiny" onclick="reprocess('${esc(r.path)}')">redo</button>
             <button class="btn tiny warn" onclick="exclude('${esc(r.path)}', ${r.excluded ? 0 : 1})">${r.excluded ? "include" : "exclude"}</button></td></tr>`;
@@ -179,7 +183,10 @@ function filesTable(rows) {
 
 function runsTable(rows) {
   if (!rows.length) return `<div class="empty">No runs recorded yet.</div>`;
-  return `<table><thead><tr>
+  return `<table>
+    <colgroup><col style="width:34%"><col style="width:10%"><col style="width:9%">
+      <col style="width:9%"><col style="width:7%"><col style="width:21%"><col style="width:10%"></colgroup>
+    <thead><tr>
       <th>File</th><th>Outcome</th><th>Trigger</th><th>Mode</th>
       <th class="num">Took</th><th>Detail</th><th>When</th></tr></thead><tbody>` +
     rows.map(r => `<tr>
