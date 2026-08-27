@@ -7,7 +7,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY db.py normalize.py app.py main.py ./
+# Copy every module; an explicit list silently omits new ones.
+COPY *.py ./
 COPY templates ./templates
 
 # Must match the media owner so rewritten files keep their uid:gid.
