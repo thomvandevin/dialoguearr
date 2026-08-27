@@ -125,7 +125,7 @@
   <div id="banner"></div>
 
   <div class="scroll"><div id="table"></div></div>
-  <footer id="foot"></footer>
+  <footer><span id="foot"></span> <span id="ver" class="envnote" style="float:right"></span></footer>
 </div>
 
 <script>
@@ -168,6 +168,7 @@ async function loadStatus() {
   $("current").textContent = busy ? s.current.name : "";
   TARGET = s.target_lufs;
   $("btn-pause").textContent = s.paused ? "Resume" : "Pause";
+  $("ver").textContent = "build " + (s.version || "dev").slice(0, 7);
   $("queue").textContent =
     `${s.queued} queued · window ${s.window} ${s.in_window ? "(open)" : "(closed)"} · target ${s.target_lufs} LUFS · ${s.preferred_languages.join(",") || "file default"}`;
 }
@@ -238,7 +239,9 @@ function settingsView(rows) {
 }
 
 function chartView(rows) {
-  if (!rows.length) return `<div class="empty">No measurements yet.</div>`;
+  if (!rows.length) return `<div class="empty">Nothing measured yet.<br>
+    <span class="envnote">Only files that were processed carry before and after levels.
+    Files skipped because they already have a stereo track never get measured.</span></div>`;
   const W = 900, H = 300, PAD = 34;
   const ins = rows.map(r => r.input_i), outs = rows.map(r => r.output_i);
   const lo = Math.floor(Math.min(...ins, ...outs) - 1), hi = Math.ceil(Math.max(...ins, ...outs) + 1);
@@ -312,7 +315,10 @@ async function loadTable() {
   if (view === "chart") {
     const rows = await get("/api/chart");
     $("table").innerHTML = chartView(rows);
-    $("foot").textContent = rows.length + " measured file(s)";
+    const sum = await get("/api/summary");
+    const total = sum.done + sum.eligible + sum.skipped + sum.failed;
+    $("foot").textContent = `${rows.length} measured of ${total} catalogued. `
+      + `Skipped files (${sum.skipped}) are not measured, so they do not appear here.`;
     return;
   }
   if (view === "files") {

@@ -14,5 +14,8 @@ COPY templates ./templates
 # Must match the media owner so rewritten files keep their uid:gid.
 USER 1000:999
 
+ARG VERSION=dev
+ENV DIALOGUEARR_VERSION=$VERSION
+
 EXPOSE 8080
 CMD ["python", "-u", "main.py"]

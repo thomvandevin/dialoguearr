@@ -8,6 +8,7 @@ configuration keeps working unchanged.
 """
 
 import logging
+import os
 import threading
 import time
 
@@ -20,6 +21,20 @@ import settings
 log = logging.getLogger("dialoguearr.web")
 
 app = Flask(__name__)
+
+VERSION = os.environ.get("DIALOGUEARR_VERSION", "dev")
+
+
+@app.after_request
+def no_store(response):
+    """Never let a browser hold on to the page.
+
+    Without this the page is heuristically cached, so a bad deploy keeps
+    serving from someone's browser long after the server is fixed.
+    """
+    if response.mimetype == "text/html":
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -247,4 +262,4 @@ def api_retry_failed():
 
 @app.get("/healthz")
 def healthz():
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "version": VERSION})

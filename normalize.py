@@ -551,6 +551,7 @@ def status():
         "window": f"{settings.get('window_start'):02d}:00-{settings.get('window_end'):02d}:00",
         "dry_run": settings.get("dry_run"),
         "paused": settings.get("paused"),
+        "version": os.environ.get("DIALOGUEARR_VERSION", "dev"),
         "target_lufs": settings.get("target_lufs"),
         "preferred_languages": preferred_languages(),
     }
