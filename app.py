@@ -43,6 +43,30 @@ def no_store(response):
 # ---------------------------------------------------------------------------
 
 
+def source_stream(info):
+    """The track the dialogue-boost was built from, or would be built from.
+
+    Taking the first surround track instead reports whichever dub happens to
+    be listed first, so a file converted from its Japanese track was labelled
+    with its French one.
+    """
+    audio = n.audio_streams(info)
+    surround = [s for s in audio if int(s.get("channels") or 0) >= 6]
+
+    boost = n.boost_track_index(info)
+    if boost is not None:
+        # Our track inherits the language of whatever it was built from.
+        lang = n.language_of(audio[boost])
+        if lang:
+            match = next((s for s in surround if n.language_of(s) == lang), None)
+            if match:
+                return match
+        return surround[0] if surround else audio[boost]
+
+    picked = n.surround_track(info)
+    return picked[1] if picked else (surround[0] if surround else None)
+
+
 def seed():
     """Populate the coverage table by walking the library once."""
     seen = 0
@@ -53,8 +77,7 @@ def seed():
         state, reason = n.classify_with_overrides(path, info)
         fields = {"library": n.library_of(path), "name": path.name,
                   "state": state, "skip_reason": reason}
-        audio = n.audio_streams(info)
-        source = next((s for s in audio if int(s.get("channels") or 0) >= 6), None)
+        source = source_stream(info)
         if source:
             fields.update(source_lang=n.language_of(source) or None,
                           source_codec=source.get("codec_name"),
