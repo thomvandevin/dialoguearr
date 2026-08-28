@@ -211,7 +211,8 @@ function filesTable(rows) {
       <th class="num">In</th><th class="num">Out</th><th class="num">Gain</th>
       <th>Mode</th><th>When</th><th></th></tr></thead><tbody>` +
     rows.map(r => {
-      const gain = (r.input_i != null && r.output_i != null) ? "+" + num(r.output_i - r.input_i) : "";
+      const g = (r.input_i != null && r.output_i != null) ? r.output_i - r.input_i : null;
+      const gain = g === null ? "" : (g > 0 ? "+" : "") + num(g);
       return `<tr>
         <td class="name">${esc(r.name)}${r.skip_reason ? `<br><span class="meta" style="color:var(--dim);font-size:11px">${esc(r.skip_reason)}</span>` : ""}</td>
         <td><span class="tag ${esc(r.state)}">${esc(r.state)}</span></td>
