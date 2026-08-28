@@ -261,7 +261,7 @@ def api_scan():
 def _manual_scan():
     queued = 0
     for path in n.scan():
-        if n.candidate(path) and n.enqueue(path, "manual"):
+        if n.candidate(path) and n.enqueue(path, "scan"):
             queued += 1
     log.info("manual scan queued %d file(s)", queued)
 
@@ -275,6 +275,32 @@ def api_retry_failed():
             db.reset_state(path)
             n.enqueue(path, "manual")
     return jsonify({"requeued": len(rows)})
+
+
+@app.get("/api/queue")
+def api_queue():
+    return jsonify(n.queue_snapshot())
+
+
+@app.post("/api/queue/run")
+def api_queue_run_all():
+    return jsonify({"promoted": n.promote()})
+
+
+@app.post("/api/queue/<path:target>/run")
+def api_queue_run_one(target):
+    path = n.Path("/" + target.lstrip("/"))
+    if not n.promote(path):
+        return jsonify({"error": "not queued, or already running now"}), 404
+    return jsonify({"promoted": 1})
+
+
+@app.delete("/api/queue/<path:target>")
+def api_queue_remove(target):
+    path = n.Path("/" + target.lstrip("/"))
+    if not n.dequeue(path):
+        return jsonify({"error": "not in the queue"}), 404
+    return jsonify({"removed": str(path)})
 
 
 @app.get("/healthz")

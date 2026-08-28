@@ -44,7 +44,6 @@ import json
 import logging
 import math
 import os
-import queue
 import re
 import subprocess
 import sys
@@ -588,19 +587,104 @@ def measured_output(detail):
 # Work queue
 # ---------------------------------------------------------------------------
 
-work = queue.Queue()
-pending = set()
-pending_lock = threading.Lock()
+# Ordered so a hand-triggered run overtakes a nightly backlog, and so the queue
+# can be looked at and rearranged rather than being an opaque blocking queue.
+PRIORITY = {"manual": 0, "webhook": 1, "scan": 2}
+
+_queue = []
+_qlock = threading.Condition()
 
 _current = {"path": None, "name": None, "stage": None, "started": None}
 
 
+def _sort_queue():
+    _queue.sort(key=lambda i: (PRIORITY.get(i["trigger"], 9), i["queued_at"]))
+
+
+def enqueue(path, trigger):
+    with _qlock:
+        for item in _queue:
+            if item["path"] == path:
+                # Already waiting. A hand-triggered request promotes it rather
+                # than being dropped as a duplicate.
+                if PRIORITY.get(trigger, 9) < PRIORITY.get(item["trigger"], 9):
+                    item["trigger"] = trigger
+                    item["queued_at"] = time.time()
+                    _sort_queue()
+                    _qlock.notify()
+                return False
+        _queue.append({"path": path, "trigger": trigger, "queued_at": time.time()})
+        _sort_queue()
+        _qlock.notify()
+        return True
+
+
+def _blocked_by(item, now):
+    """Why this item cannot run yet, or None when it is ready."""
+    if settings.get("paused") and item["trigger"] != "manual":
+        return "paused"
+    if item["trigger"] == "scan" and not in_window():
+        return "waiting for the window"
+    if item["trigger"] == "webhook":
+        left = settings.get("import_delay") - (now - item["queued_at"])
+        if left > 0:
+            return f"settling, {int(left)}s"
+    return None
+
+
+def take():
+    """Block until something is runnable, then hand it over."""
+    with _qlock:
+        while True:
+            now = time.time()
+            for i, item in enumerate(_queue):
+                if _blocked_by(item, now) is None:
+                    return _queue.pop(i)
+            _qlock.wait(timeout=5)
+
+
+def queue_snapshot():
+    now = time.time()
+    with _qlock:
+        return [{"path": str(i["path"]), "name": i["path"].name,
+                 "trigger": i["trigger"], "waiting": _blocked_by(i, now) or "ready",
+                 "queued_at": i["queued_at"]} for i in _queue]
+
+
+def queue_depth():
+    with _qlock:
+        return len(_queue)
+
+
+def promote(path=None):
+    """Run now: make items manual so no window or settling delay applies."""
+    with _qlock:
+        moved = 0
+        for item in _queue:
+            if path is not None and item["path"] != path:
+                continue
+            if item["trigger"] != "manual":
+                item["trigger"] = "manual"
+                item["queued_at"] = time.time()
+                moved += 1
+        _sort_queue()
+        _qlock.notify_all()
+        return moved
+
+
+def dequeue(path):
+    with _qlock:
+        for i, item in enumerate(_queue):
+            if item["path"] == path:
+                _queue.pop(i)
+                return True
+        return False
+
+
 def status():
-    with pending_lock:
-        depth = len(pending)
     return {
         "current": dict(_current),
-        "queued": depth,
+        "queued": queue_depth(),
         "in_window": in_window(),
         "window": f"{settings.get('window_start'):02d}:00-{settings.get('window_end'):02d}:00",
         "dry_run": settings.get("dry_run"),
@@ -611,38 +695,16 @@ def status():
     }
 
 
-def enqueue(path, trigger):
-    with pending_lock:
-        if path in pending:
-            return False
-        pending.add(path)
-    work.put((path, trigger))
-    return True
-
-
 def worker():
     while True:
-        path, trigger = work.get()
-        urgent = trigger != "scan"
-        while settings.get("paused") and trigger != "manual":
-            time.sleep(10)
+        item = take()
+        path, trigger = item["path"], item["trigger"]
         try:
-            # Backfill items are window-bound; the next scan re-queues whatever
-            # is dropped here. Imports are never deferred.
-            if not urgent and not in_window():
-                continue
-            delay = settings.get("import_delay")
-            if urgent and delay:
-                time.sleep(delay)
             if not path.is_file():
                 continue
             process(path, trigger)
         except OSError as exc:
             log.error("error handling %s: %s", path.name, exc)
-        finally:
-            with pending_lock:
-                pending.discard(path)
-            work.task_done()
 
 
 def media_paths(obj, found=None):

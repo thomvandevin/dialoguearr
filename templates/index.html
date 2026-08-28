@@ -146,10 +146,12 @@
   <nav>
     <button data-view="files" class="on">Files</button>
     <button data-view="runs">History</button>
+    <button data-view="queue">Queue</button>
     <button data-view="settings">Settings</button>
     <button data-view="chart">Chart</button>
     <input type="search" id="q" placeholder="filter by name">
     <span class="actions">
+      <button class="btn" id="btn-runall" style="display:none">Convert all now</button>
       <button class="btn" id="btn-scan">Scan now</button>
       <button class="btn" id="btn-pause">Pause</button>
       <button class="btn warn" id="btn-retry" style="display:none">Retry failed</button>
@@ -219,6 +221,10 @@ async function loadStatus() {
   TARGET = s.target_lufs;
   $("btn-pause").textContent = s.paused ? "Resume" : "Pause";
   $("ver").textContent = "build " + (s.version || "dev").slice(0, 7);
+  const qb = document.querySelector('nav button[data-view="queue"]');
+  if (qb) qb.textContent = s.queued ? `Queue ${s.queued}` : "Queue";
+  $("btn-runall").style.display = (view === "queue" && s.queued) ? "" : "none";
+  if (view === "queue") loadTable();
   $("queue").textContent =
     `${s.queued} queued · window ${s.window} ${s.in_window ? "(open)" : "(closed)"} · target ${s.target_lufs} LUFS · ${s.preferred_languages.join(",") || "file default"}`;
 }
@@ -249,6 +255,32 @@ function filesTable(rows) {
         <td><button class="btn tiny" onclick="reprocess('${esc(r.path)}')">redo</button>
             <button class="btn tiny warn" onclick="exclude('${esc(r.path)}', ${r.excluded ? 0 : 1})">${r.excluded ? "include" : "exclude"}</button></td></tr>`;
     }).join("") + "</tbody></table>";
+}
+
+function queueTable(rows) {
+  if (!rows.length) return `<div class="empty">Nothing queued.<br>
+    <span class="envnote">Imports and scans land here. Redo runs immediately and will
+    only appear while it is being worked on.</span></div>`;
+  return `<table>
+    <colgroup><col style="width:46%"><col style="width:12%"><col style="width:24%"><col style="width:18%"></colgroup>
+    <thead><tr><th>File</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>` +
+    rows.map(r => `<tr>
+      <td class="name">${esc(r.name)}</td>
+      <td><span class="tag">${esc(r.trigger)}</span></td>
+      <td>${r.waiting === "ready" ? `<span class="tag done">ready</span>` : esc(r.waiting)}</td>
+      <td><button class="btn tiny" onclick="runNow('${esc(r.path)}')">run now</button>
+          <button class="btn tiny warn" onclick="unqueue('${esc(r.path)}')">remove</button></td>
+    </tr>`).join("") + "</tbody></table>";
+}
+
+async function runNow(path) {
+  const r = await fetch(`/api/queue/${path.replace(/^\//, "")}/run`, {method: "POST"});
+  banner(r.ok ? "running now" : "that file is no longer queued");
+  loadTable(); loadStatus();
+}
+async function unqueue(path) {
+  await fetch(`/api/queue/${path.replace(/^\//, "")}`, {method: "DELETE"});
+  banner("removed from the queue"); loadTable(); loadStatus();
 }
 
 function runsTable(rows) {
@@ -348,7 +380,7 @@ async function resetSetting(key) {
 }
 async function reprocess(path) {
   const r = await fetch(`/api/files/${path.replace(/^\//, "")}/reprocess`, {method: "POST"});
-  if (r.ok) { banner("queued, it will run even though it was skipped"); }
+  if (r.ok) { banner("running now, even though it was skipped"); }
   else { const e = await r.json().catch(() => ({})); banner(e.error || "could not queue that file"); }
   loadTable();
 }
@@ -372,6 +404,14 @@ async function loadTable() {
     const rows = await get("/api/settings");
     $("table").innerHTML = settingsView(rows);
     $("foot").textContent = "Values shown are overrides stored in the database. The placeholder is what docker-compose.yml declares.";
+    return;
+  }
+  if (view === "queue") {
+    const rows = await get("/api/queue");
+    $("table").innerHTML = queueTable(rows);
+    $("foot").textContent = rows.length
+      ? `${rows.length} queued. Convert all now ignores the window and the settling delay.`
+      : "";
     return;
   }
   if (view === "chart") {
@@ -407,7 +447,11 @@ $("home").onclick = () => {
   document.querySelector('nav button[data-view="files"]').classList.add("on");
   view = "files"; loadTable();
 };
-$("btn-scan").onclick = async () => { await fetch("/api/scan", {method: "POST"}); banner("scan started"); };
+$("btn-runall").onclick = async () => {
+  const r = await (await fetch("/api/queue/run", {method: "POST"})).json();
+  banner(`running ${r.promoted} queued file(s) now`); loadTable(); loadStatus();
+};
+$("btn-scan").onclick = async () => { await fetch("/api/scan", {method: "POST"}); banner("scan started, anything eligible lands in the queue"); };
 $("btn-retry").onclick = async () => {
   const r = await (await fetch("/api/retry-failed", {method: "POST"})).json();
   banner(`requeued ${r.requeued} failed file(s)`); loadTable();

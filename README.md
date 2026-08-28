@@ -63,6 +63,7 @@ Cost is about **32 KB/s of runtime**, so roughly 220 MB added to a two-hour film
 - **Picks the right language** when a release carries several dubs
 - **Web UI** with coverage, per-file levels, run history and live status
 - **Runtime settings**, per-file overrides, and one-click reprocessing
+- **A visible queue** you can run early, reorder or empty, instead of waiting for the window
 - **Verifies before replacing**, and never discards the original surround track
 
 ## Quick start
@@ -160,9 +161,11 @@ Files are rewritten in place, so the process is deliberately careful:
 | `GET /api/status` | Live: current file, queue depth, whether the window is open |
 | `GET /api/files` | Coverage table, supports `?state=` and `?q=` |
 | `GET /api/runs` | Run history |
+| `GET /api/queue` | What is waiting, and why each item is waiting |
+| `POST /api/queue/run` | Run everything queued now, ignoring the window |
 | `GET /api/chart` | Before and after levels for every measured file |
 | `GET`/`PUT` `/api/settings` | Read and change runtime settings |
-| `POST /api/scan` | Scan the library now |
+| `POST /api/scan` | Scan the library, adding anything eligible to the queue |
 | `POST /api/retry-failed` | Requeue everything that failed |
 
 ## Notes
