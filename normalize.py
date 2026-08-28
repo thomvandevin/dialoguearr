@@ -411,8 +411,13 @@ def skip_reason(info):
     return "no 5.1 track"
 
 
-def candidate(path, info=None):
-    """The track to convert, honouring per-file overrides and the threshold."""
+def candidate(path, info=None, force=False):
+    """The track to convert, honouring per-file overrides and the threshold.
+
+    `force` is what a manual run means: convert even though the file already
+    carries a stereo track, which is otherwise treated as a good enough
+    fallback and skipped.
+    """
     info = info if info is not None else probe(path)
     if not info:
         return None
@@ -420,7 +425,7 @@ def candidate(path, info=None):
     if row.get("excluded"):
         return None
     duration = float(info.get("format", {}).get("duration") or 0)
-    allow = wants_reprocessing(path, info, duration) if duration > 0 else False
+    allow = force or (wants_reprocessing(path, info, duration) if duration > 0 else False)
     return surround_track(info, allow_existing_stereo=allow, override=row)
 
 
@@ -433,12 +438,14 @@ def process(path, trigger="scan"):
         log.info("skipping %s: excluded", path.name)
         return False
 
-    picked = candidate(path, info)
+    picked = candidate(path, info, force=(trigger == "manual"))
     if not picked:
         # Only webhook-queued files reach here without being candidates, since
         # the backfill scan pre-filters. Saying why keeps a silent skip from
         # looking like a failure.
         reason = skip_reason(info)
+        if trigger == "manual":
+            reason = f"{reason}, and nothing to convert even when forced"
         log.info("skipping %s: %s", path.name, reason)
         db.upsert_file(path, library=library_of(path), name=path.name,
                        state="skipped", skip_reason=reason)

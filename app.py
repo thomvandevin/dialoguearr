@@ -219,7 +219,16 @@ def api_chart():
 def api_reprocess(target):
     path = n.Path("/" + target.lstrip("/"))
     if not path.is_file():
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"error": "file not found on disk"}), 404
+    if (db.get_file(path) or {}).get("excluded"):
+        return jsonify({"error": "this file is excluded, include it first"}), 409
+
+    info = n.probe(path)
+    if not info:
+        return jsonify({"error": "could not read this file"}), 422
+    if not n.candidate(path, info, force=True):
+        return jsonify({"error": f"nothing to convert: {n.skip_reason(info)}"}), 422
+
     db.reset_state(path)
     n.enqueue(path, "manual")
     return jsonify({"queued": str(path)})

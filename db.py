@@ -194,6 +194,7 @@ def summary():
             "ORDER BY started_at DESC LIMIT 1").fetchone()
     return {
         "done": by_state.get("done", 0),
+        "excluded": by_state.get("excluded", 0),
         "eligible": by_state.get("eligible", 0),
         "skipped": by_state.get("skipped", 0),
         "failed": by_state.get("failed", 0),

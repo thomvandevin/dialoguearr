@@ -75,6 +75,12 @@
   .setrow.over .key::after { content: " override"; color: var(--primary); font-size: 10px;
                              text-transform: uppercase; letter-spacing: .05em; }
   .envnote { color: var(--dim); font-size: 11px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; }
+  .chip { background: transparent; border: 1px solid var(--line); color: var(--dim);
+          padding: 5px 11px; border-radius: 20px; cursor: pointer; font-size: 12px; }
+  .chip:hover { color: var(--fg); }
+  .chip.on { background: hsl(225 14% 26%); color: var(--fg); border-color: hsl(225 14% 34%); }
+  .chip b { color: var(--fg); font-weight: 600; }
   .switch { display: inline-flex; align-items: center; cursor: pointer; }
   .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
   .switch span { width: 40px; height: 22px; border-radius: 11px; background: var(--line);
@@ -150,6 +156,7 @@
     </span>
   </nav>
   <div id="banner"></div>
+  <div class="chips" id="chips"></div>
 
   <div class="scroll"><div id="table"></div></div>
   <footer><span id="foot"></span> <span id="ver" class="envnote" style="float:right"></span></footer>
@@ -158,6 +165,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let view = "files";
+let stateFilter = "";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const num = (v, d = 1) => v === null || v === undefined ? "" : Number(v).toFixed(d);
@@ -172,8 +180,23 @@ const ago = (iso) => {
 
 async function get(url) { const r = await fetch(url); return r.json(); }
 
+function renderChips(s) {
+  if (view !== "files") { $("chips").innerHTML = ""; return; }
+  const all = s.done + s.eligible + s.skipped + s.failed + (s.excluded || 0);
+  const opts = [["", "All", all], ["done", "Processed", s.done], ["eligible", "Eligible", s.eligible],
+                ["skipped", "Skipped", s.skipped], ["failed", "Failed", s.failed],
+                ["excluded", "Excluded", s.excluded || 0]];
+  $("chips").innerHTML = opts
+    .filter(([k, , n]) => n > 0 || k === "" || k === "done")
+    .map(([k, label, n]) => `<button class="chip ${stateFilter === k ? "on" : ""}"
+        onclick="setState('${k}')">${label} <b>${n}</b></button>`).join("");
+}
+
+function setState(k) { stateFilter = k; loadSummary(); loadTable(); }
+
 async function loadSummary() {
   const s = await get("/api/summary");
+  renderChips(s);
   const langs = Object.entries(s.by_language || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
   $("cards").innerHTML = `
     <div class="card pos"><div class="n">${s.done}</div><div class="k">processed</div></div>
@@ -203,7 +226,7 @@ async function loadStatus() {
 function filesTable(rows) {
   if (!rows.length) return `<div class="empty">Nothing to show yet.</div>`;
   return `<table>
-    <colgroup><col style="width:30%"><col style="width:7%"><col style="width:8%">
+    <colgroup><col style="width:28%"><col style="width:9%"><col style="width:8%">
       <col style="width:8%"><col style="width:6%"><col style="width:6%"><col style="width:6%">
       <col style="width:8%"><col style="width:8%"><col style="width:13%"></colgroup>
     <thead><tr>
@@ -325,7 +348,9 @@ async function resetSetting(key) {
 }
 async function reprocess(path) {
   const r = await fetch(`/api/files/${path.replace(/^\//, "")}/reprocess`, {method: "POST"});
-  banner(r.ok ? "queued for reprocessing" : "could not queue that file"); loadTable();
+  if (r.ok) { banner("queued, it will run even though it was skipped"); }
+  else { const e = await r.json().catch(() => ({})); banner(e.error || "could not queue that file"); }
+  loadTable();
 }
 async function exclude(path, on) {
   await fetch(`/api/files/${path.replace(/^\//, "")}`, {method: "PUT",
@@ -341,6 +366,7 @@ async function loadTable() {
   const q = encodeURIComponent($("q").value || "");
   const box = $("table").parentElement;
   box.classList.toggle("free", view === "settings" || view === "chart");
+  if (view !== "files") $("chips").innerHTML = "";
   $("q").style.display = (view === "files") ? "" : "none";
   if (view === "settings") {
     const rows = await get("/api/settings");
@@ -358,7 +384,7 @@ async function loadTable() {
     return;
   }
   if (view === "files") {
-    const rows = await get("/api/files?limit=1000&q=" + q);
+    const rows = await get(`/api/files?limit=1000&q=${q}&state=${stateFilter}`);
     $("table").innerHTML = filesTable(rows);
     $("foot").textContent = rows.length + " file(s) shown";
   } else {
@@ -372,7 +398,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.remove("on"));
   b.classList.add("on");
   view = b.dataset.view;
-  loadTable();
+  loadSummary(); loadTable();
 });
 let t; $("q").oninput = () => { clearTimeout(t); t = setTimeout(loadTable, 250); };
 
