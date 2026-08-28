@@ -150,7 +150,8 @@ def boost_track_index(info):
     return None
 
 
-def surround_track(info, allow_existing_stereo=False, override=None, redo=False):
+def surround_track(info, allow_existing_stereo=False, override=None, redo=False,
+                   allow_stereo_source=False):
     """Return (audio-relative index, stream) of the 5.1 track to convert."""
     audio = audio_streams(info)
     if not audio:
@@ -163,7 +164,15 @@ def surround_track(info, allow_existing_stereo=False, override=None, redo=False)
     surround = [(i, s) for i, s in enumerate(audio)
                 if int(s.get("channels") or 0) == 6]
     if not surround:
-        return None
+        if not allow_stereo_source:
+            return None
+        # Nothing to fold down, so normalise the best stereo track instead.
+        stereo = [(i, s) for i, s in enumerate(audio)
+                  if int(s.get("channels") or 0) == 2
+                  and (s.get("tags") or {}).get("title") != TRACK_TITLE]
+        if not stereo:
+            return None
+        surround = stereo
 
     override = override or {}
 
@@ -219,10 +228,31 @@ def wants_reprocessing(path, info, duration):
     return level is not None and level < threshold
 
 
-def analyse(path, aidx):
+def filter_chain(downmix, measured=None):
+    """Downmix then normalise, or normalise alone when the source is stereo.
+
+    A stereo-only file has nothing to fold down, but its dynamic range is
+    still the reason dialogue disappears, so normalising it on its own is
+    worth doing.
+    """
+    chain = [pan_filter()] if downmix else []
+    ln = (f"loudnorm=I={settings.get('target_lufs')}"
+          f":LRA={settings.get('target_lra')}:TP={settings.get('target_tp')}")
+    if measured is None:
+        ln += ":print_format=json"
+    elif measured is not SINGLE_PASS:
+        ln += (f":measured_I={measured['input_i']}"
+               f":measured_LRA={measured['input_lra']}"
+               f":measured_TP={measured['input_tp']}"
+               f":measured_thresh={measured['input_thresh']}"
+               f":offset={measured['target_offset']}")
+    chain.append(ln)
+    return ",".join(chain)
+
+
+def analyse(path, aidx, downmix=True):
     """First loudnorm pass, returning the measured values for the second."""
-    flt = (f"{pan_filter()},loudnorm=I={settings.get('target_lufs')}"
-           f":LRA={settings.get('target_lra')}:TP={settings.get('target_tp')}:print_format=json")
+    flt = filter_chain(downmix)
     r = run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
              "-map", f"0:a:{aidx}", "-af", flt, "-f", "null", "-"])
     m = LOUDNORM_JSON.search(r.stderr)
@@ -248,15 +278,8 @@ def analyse(path, aidx):
     return SINGLE_PASS
 
 
-def encode(src, dst, aidx, measured, n_audio, drop=()):
-    flt = (f"{pan_filter()},loudnorm=I={settings.get('target_lufs')}"
-           f":LRA={settings.get('target_lra')}:TP={settings.get('target_tp')}")
-    if measured is not SINGLE_PASS:
-        flt += (f":measured_I={measured['input_i']}"
-                f":measured_LRA={measured['input_lra']}"
-                f":measured_TP={measured['input_tp']}"
-                f":measured_thresh={measured['input_thresh']}"
-                f":offset={measured['target_offset']}")
+def encode(src, dst, aidx, measured, n_audio, drop=(), downmix=True):
+    flt = filter_chain(downmix, measured)
 
     keep = [i for i in range(n_audio) if i not in set(drop)]
     cmd = ["ffmpeg", "-y", "-hide_banner", "-nostats", "-i", str(src),
@@ -441,7 +464,8 @@ def candidate(path, info=None, force=False):
         return None
     duration = float(info.get("format", {}).get("duration") or 0)
     allow = force or (wants_reprocessing(path, info, duration) if duration > 0 else False)
-    return surround_track(info, allow_existing_stereo=allow, override=row, redo=force)
+    return surround_track(info, allow_existing_stereo=allow, override=row,
+                          redo=force, allow_stereo_source=force)
 
 
 def process(path, trigger="scan"):
@@ -473,8 +497,11 @@ def process(path, trigger="scan"):
         return False
 
     n_audio = len([s for s in info["streams"] if s.get("codec_type") == "audio"])
-    log.info("candidate: %s (%s %dch, %.0f min)", path.name,
-             stream.get("codec_name"), int(stream.get("channels") or 0), duration / 60)
+    channels = int(stream.get("channels") or 0)
+    downmix = channels >= 6
+    log.info("candidate: %s (%s %dch, %.0f min, %s)", path.name,
+             stream.get("codec_name"), channels, duration / 60,
+             "downmix and normalise" if downmix else "normalise only")
 
     db.upsert_file(path, library=library_of(path), name=path.name,
                    duration=duration, size=path.stat().st_size, state="eligible",
@@ -491,7 +518,7 @@ def process(path, trigger="scan"):
                     started=db.now())
     mode = None
     try:
-        measured = analyse(path, aidx)
+        measured = analyse(path, aidx, downmix=downmix)
         if not measured:
             db.finish_run(run_id, "failed", "analysis produced no measurement")
             db.upsert_file(path, state="failed")
@@ -514,7 +541,8 @@ def process(path, trigger="scan"):
             # otherwise the file ends up carrying two of them.
             stale = boost_track_index(info)
             drop = () if stale is None else (stale,)
-            if not encode(path, tmp, aidx, measured, n_audio, drop=drop):
+            if not encode(path, tmp, aidx, measured, n_audio, drop=drop,
+                          downmix=downmix):
                 db.finish_run(run_id, "failed", "encode failed", mode)
                 db.upsert_file(path, state="failed")
                 return False
