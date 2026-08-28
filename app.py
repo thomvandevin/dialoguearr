@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from datetime import UTC, datetime
 
 from flask import Flask, jsonify, render_template, request
 
@@ -60,7 +61,14 @@ def seed():
                           source_channels=int(source.get("channels") or 0))
         try:
             fields["duration"] = float(info.get("format", {}).get("duration") or 0)
-            fields["size"] = path.stat().st_size
+            stat = path.stat()
+            fields["size"] = stat.st_size
+            # A file catalogued from an existing library has no run behind it,
+            # so its mtime is the best available answer to "when was this done"
+            # and stops the table reporting the scan time instead.
+            if state == "done" and not (db.get_file(path) or {}).get("processed_at"):
+                fields["processed_at"] = datetime.fromtimestamp(
+                    stat.st_mtime, UTC).isoformat(timespec="seconds")
         except (OSError, ValueError):
             pass
         db.upsert_file(path, **fields)
