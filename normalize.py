@@ -142,12 +142,20 @@ def language_of(stream):
     return LANG_ALIASES.get(code, code)
 
 
-def surround_track(info, allow_existing_stereo=False, override=None):
+def boost_track_index(info):
+    """Index of a dialogue-boost track we added previously, if any."""
+    for i, s in enumerate(audio_streams(info)):
+        if (s.get("tags") or {}).get("title") == TRACK_TITLE:
+            return i
+    return None
+
+
+def surround_track(info, allow_existing_stereo=False, override=None, redo=False):
     """Return (audio-relative index, stream) of the 5.1 track to convert."""
     audio = audio_streams(info)
     if not audio:
         return None
-    if any((s.get("tags") or {}).get("title") == TRACK_TITLE for s in audio):
+    if not redo and boost_track_index(info) is not None:
         return None
     if not allow_existing_stereo and any(int(s.get("channels") or 0) <= 2 for s in audio):
         return None
@@ -240,7 +248,7 @@ def analyse(path, aidx):
     return SINGLE_PASS
 
 
-def encode(src, dst, aidx, measured, n_audio):
+def encode(src, dst, aidx, measured, n_audio, drop=()):
     flt = (f"{pan_filter()},loudnorm=I={settings.get('target_lufs')}"
            f":LRA={settings.get('target_lra')}:TP={settings.get('target_tp')}")
     if measured is not SINGLE_PASS:
@@ -250,16 +258,19 @@ def encode(src, dst, aidx, measured, n_audio):
                 f":measured_thresh={measured['input_thresh']}"
                 f":offset={measured['target_offset']}")
 
+    keep = [i for i in range(n_audio) if i not in set(drop)]
     cmd = ["ffmpeg", "-y", "-hide_banner", "-nostats", "-i", str(src),
-           "-map", "0:v", "-map", f"0:a:{aidx}", "-map", "0:a",
-           "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0",
+           "-map", "0:v", "-map", f"0:a:{aidx}"]
+    for i in keep:
+        cmd += ["-map", f"0:a:{i}"]
+    cmd += ["-map", "0:s?", "-map", "0:t?", "-map_chapters", "0",
            "-c", "copy", "-max_muxing_queue_size", "4096",
            # loudnorm resamples to 192kHz internally, so pin the rate back.
            "-c:a:0", "aac", "-b:a:0", settings.get("audio_bitrate"), "-ar:a:0", "48000",
            "-filter:a:0", flt,
            "-metadata:s:a:0", f"title={TRACK_TITLE}",
            "-disposition:a:0", "default"]
-    for i in range(1, n_audio + 1):
+    for i in range(1, len(keep) + 1):
         cmd += [f"-disposition:a:{i}", "0"]
     cmd.append(str(dst))
 
@@ -406,9 +417,13 @@ def skip_reason(info):
     audio = [x for x in info.get("streams", []) if x.get("codec_type") == "audio"]
     if any((x.get("tags") or {}).get("title") == TRACK_TITLE for x in audio):
         return "already has a dialogue-boost track"
+    # Check for something to convert before blaming the stereo track, or a
+    # stereo-only file reads as though forcing it would achieve something.
+    if not any(int(x.get("channels") or 0) == 6 for x in audio):
+        return "no 5.1 track"
     if any(int(x.get("channels") or 0) <= 2 for x in audio):
         return "already has a stereo track"
-    return "no 5.1 track"
+    return "no usable surround track"
 
 
 def candidate(path, info=None, force=False):
@@ -426,7 +441,7 @@ def candidate(path, info=None, force=False):
         return None
     duration = float(info.get("format", {}).get("duration") or 0)
     allow = force or (wants_reprocessing(path, info, duration) if duration > 0 else False)
-    return surround_track(info, allow_existing_stereo=allow, override=row)
+    return surround_track(info, allow_existing_stereo=allow, override=row, redo=force)
 
 
 def process(path, trigger="scan"):
@@ -495,7 +510,11 @@ def process(path, trigger="scan"):
         mtime = path.stat().st_mtime
         tmp = path.with_name(f".{path.stem}.audionorm{path.suffix}")
         try:
-            if not encode(path, tmp, aidx, measured, n_audio):
+            # Rebuilding over a previous run: drop the track it left behind,
+            # otherwise the file ends up carrying two of them.
+            stale = boost_track_index(info)
+            drop = () if stale is None else (stale,)
+            if not encode(path, tmp, aidx, measured, n_audio, drop=drop):
                 db.finish_run(run_id, "failed", "encode failed", mode)
                 db.upsert_file(path, state="failed")
                 return False
