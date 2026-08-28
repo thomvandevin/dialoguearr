@@ -216,7 +216,11 @@ def list_files(state=None, query=None, limit=500):
         args.append(f"%{query}%")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY COALESCE(processed_at, updated_at) DESC LIMIT ?"
+    # Files that were actually processed first. Ordering on a coalesced
+    # timestamp let every skipped file's scan time outrank them, which
+    # buries the interesting rows under hundreds of untouched ones.
+    sql += (" ORDER BY processed_at IS NULL, processed_at DESC,"
+            " updated_at DESC LIMIT ?")
     args.append(limit)
     with connect() as conn:
         return [dict(r) for r in conn.execute(sql, args)]
