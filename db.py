@@ -7,10 +7,10 @@ can be seeded from Plex, `runs` is the append-only history.
 
 import os
 import sqlite3
-from pathlib import Path
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
 DB_PATH = os.environ.get("DB_PATH", "/state/dialoguearr.db")
 
