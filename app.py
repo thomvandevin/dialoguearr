@@ -96,7 +96,8 @@ def seed():
             pass
         db.upsert_file(path, **fields)
         seen += 1
-    log.info("seed complete, %d file(s) catalogued", seen)
+    pruned = db.prune_missing()
+    log.info("seed complete, %d file(s) catalogued, %d stale row(s) dropped", seen, pruned)
 
 
 def backfill():

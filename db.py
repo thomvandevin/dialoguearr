@@ -7,6 +7,7 @@ can be seeded from Plex, `runs` is the append-only history.
 
 import os
 import sqlite3
+from pathlib import Path
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -116,6 +117,16 @@ def get_file(path):
     with connect() as conn:
         row = conn.execute("SELECT * FROM files WHERE path=?", (str(path),)).fetchone()
         return dict(row) if row else None
+
+
+def prune_missing():
+    """Drop catalogue rows whose file is gone, e.g. after a library rename."""
+    with _write_lock, connect() as conn:
+        gone = [r["path"] for r in conn.execute("SELECT path FROM files")
+                if not Path(r["path"]).is_file()]
+        conn.executemany("DELETE FROM files WHERE path=?", [(p,) for p in gone])
+        conn.commit()
+    return len(gone)
 
 
 def reset_state(path, state="eligible"):
